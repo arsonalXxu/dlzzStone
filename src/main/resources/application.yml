@@ -1,0 +1,53 @@
+server:
+  port: 8080
+  servlet:
+    contextPath: /customapi
+
+spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://193.112.187.206:30501/ipaas?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: root
+    password: 123456
+    type: com.alibaba.druid.pool.DruidDataSource
+  mvc:
+    pathmatch:
+      matching-strategy: ant_path_matcher
+
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.icss.onlineorderingsys.model
+
+logging:
+  level:
+    org.springframework: DEBUG  # 开启 Spring 框架的调试日志
+  file:
+    name: logging.log
+
+deipaas:
+  new-http-connector: true
+  elasticsearch:
+    dynamic:
+      primary: master
+      datasource:
+        master:
+          hosts:
+            - 193.112.187.206:30502
+          password: DF_welc@me_2@25_p@c
+          username: elastic
+          connection-timeout: 5000ms
+          socket-timeout: 60000ms
+          max-conn-total: 10
+          max-conn-per-route: 10
+          idle-connection-timeout: 30000ms
+          es-type: ES7
+
+sync:
+  tenantId: 702589415687455744
+  page: 1
+  pageSize: 100000
+  originalIndexName: poc_apiflow_base_log_702591298544075776
+  gateIndexName: poc_apiflow_gateway_log_702591298544075776_1745318931070-000001
+  targetIndexName: aggregation_result_index
+  days: 1
+  cron: 0 0/30 * * * ?
