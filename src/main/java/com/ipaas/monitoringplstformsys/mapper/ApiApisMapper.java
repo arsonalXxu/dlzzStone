@@ -101,4 +101,42 @@ public interface ApiApisMapper extends BaseMapper<ApiApis> {
             " AND deleted = 'N'" +
             "</script>")
     Page<FndConsumers> queryFndConsumers(@Param("page") Page<FndConsumers> page, @Param("keyword") String keyword, @Param("tenantId") String tenantId);
+
+    // ==================== 新增的方法 ====================
+    @Select("SELECT role_type, user_account " +
+            "FROM api_user_relation " +
+            "WHERE api_code = #{apiId} AND factory = #{factory}")
+    List<ApiUserRelation> queryRelationByFactory(@Param("apiCode") String apiCode, @Param("factory") String factory);
+
+    /**
+     * 根据 apiCode 和 factory 查询负责人账号 (直接返回 user_account)
+     */
+    @Select("SELECT user_account " +
+            "FROM api_user_relation " +
+            "WHERE api_code = #{apiCode} AND factory = #{factory}")
+    List<String> queryUserAccountByFactory(@Param("apiCode") String apiCode, @Param("factory") String factory);
+
+    // 【新增】根据 apiCode, factory, roleType 查询 user_account
+    @Select("SELECT user_account " +
+            "FROM api_user_relation " +
+            "WHERE api_code = #{apiCode} " +
+            "  AND factory = #{factory} " +
+            "  AND role_type = #{roleType}")
+    List<String> queryUserAccountByFactoryAndRole(@Param("apiCode") String apiCode,
+                                                  @Param("factory") String factory,
+                                                  @Param("roleType") String roleType);
+
+    /**
+     * 【修改】根据 apiCode, factory, roleType 查询负责人【姓名】
+     * 关联 FND_USERS 表获取 user_name
+     */
+    @Select("SELECT u.user_name " +
+            "FROM api_user_relation r " +
+            "JOIN FND_USERS u ON r.user_account = u.user_account " +
+            "WHERE r.api_code = #{apiCode} " +
+            "  AND r.factory = #{factory} " +
+            "  AND r.role_type = #{roleType}")
+    List<String> queryUserNameByFactoryAndRole(@Param("apiCode") String apiCode,
+                                               @Param("factory") String factory,
+                                               @Param("roleType") String roleType);
 }

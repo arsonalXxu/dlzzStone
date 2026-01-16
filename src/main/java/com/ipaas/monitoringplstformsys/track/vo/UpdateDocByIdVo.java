@@ -8,6 +8,7 @@ import java.util.List;
 public class UpdateDocByIdVo {
 
     private List<String> docIds;
+    private String requestId;
 
     private String result;
 

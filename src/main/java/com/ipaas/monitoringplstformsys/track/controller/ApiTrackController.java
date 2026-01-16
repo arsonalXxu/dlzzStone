@@ -40,7 +40,7 @@ public class ApiTrackController {
 
     @PostMapping("/saveDocumentById")
     public Response saveDocumentById(@RequestBody List<UpdateDocByIdVo> updateDocByIdVos) {
-        apiTrackService.saveDocumentById(updateDocByIdVos);
+        apiTrackService.saveOrUpdateApiRunTrackInfo(updateDocByIdVos);
         return Response.ok();
     }
 
@@ -58,8 +58,6 @@ public class ApiTrackController {
     public Response aggregationResultByCategory(@RequestBody AggResultSearchReq reqVo){
         return Response.ok().setData(apiTrackService.aggregationResultByCategory(reqVo));
     }
-
-
 
 }
 

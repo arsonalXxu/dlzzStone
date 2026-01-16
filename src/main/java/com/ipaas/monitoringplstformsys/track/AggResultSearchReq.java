@@ -12,6 +12,7 @@ public class AggResultSearchReq implements Serializable {
     private String sortOrder; // 排序方向，"asc" 或 "desc"
     private String apiRunReports;//API系统运行报告,用于区分是哪个系统下的API调用情况
     // 查询参数
+    private String envId;
     private String apiCode;
     private String apiName;
     private String category;

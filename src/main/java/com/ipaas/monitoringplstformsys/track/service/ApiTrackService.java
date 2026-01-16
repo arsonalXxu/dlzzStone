@@ -14,9 +14,13 @@ import com.alibaba.excel.EasyExcel;
 import com.alibaba.excel.ExcelWriter;
 import com.alibaba.excel.support.ExcelTypeEnum;
 import com.alibaba.excel.write.metadata.WriteSheet;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.ipaas.monitoringplstformsys.common.constant.DeipaasExceptionEnum;
 import com.ipaas.monitoringplstformsys.common.exception.base.XdapWarningException;
+import com.ipaas.monitoringplstformsys.mapper.ApiRunTrackInfoMapper;
+import com.ipaas.monitoringplstformsys.mapper.IApiRunTrackInfoService;
+import com.ipaas.monitoringplstformsys.module.ApiRunTrackInfo;
 import com.ipaas.monitoringplstformsys.track.AggResultSearchReq;
 import com.ipaas.monitoringplstformsys.track.AggregationResult;
 import com.ipaas.monitoringplstformsys.track.ApiInfoReq;
@@ -40,6 +44,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
 
 
@@ -78,6 +83,13 @@ public class ApiTrackService {
 
     @Resource
     private ApiApisMapper apiApisMapper;
+
+    @Resource
+    private ApiRunTrackInfoMapper apiRunTrackInfoMapper;
+
+    @Resource
+    private IApiRunTrackInfoService apiRunTrackInfoService;
+
     @Value("${sync.tenantId}")
     private String tenantId;
 
@@ -780,12 +792,95 @@ public class ApiTrackService {
         });
     }
 
+    /**
+     * 保存/更新预处理时间和结果 (操作 MySQL)
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public void saveOrUpdateApiRunTrackInfo(List<UpdateDocByIdVo> reqVos) {
+        if (CollectionUtils.isEmpty(reqVos)) return;
+
+        SimpleDateFormat simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+
+        // 1. 提取本次请求涉及的所有 requestId (去重)
+        List<String> allRequestIds = reqVos.stream()
+                .map(UpdateDocByIdVo::getRequestId) // 假设前端传的是 requestId
+                .filter(StringUtils::isNotEmpty)
+                .distinct()
+                .collect(Collectors.toList());
+
+        if (CollectionUtils.isEmpty(allRequestIds)) return;
+
+        // 2. 【批量查询】一次性查出数据库中已存在的记录
+        List<ApiRunTrackInfo> existList = apiRunTrackInfoService.list(
+                new QueryWrapper<ApiRunTrackInfo>().in("request_id", allRequestIds)
+        );
+        // 转为 Map 方便匹配: Key=requestId, Value=Entity
+        Map<String, ApiRunTrackInfo> existMap = existList.stream()
+                .collect(Collectors.toMap(ApiRunTrackInfo::getRequestId, v -> v));
+
+        // 3. 准备两个集合：新增列表 和 更新列表
+        List<ApiRunTrackInfo> toInsertList = new ArrayList<>();
+        List<ApiRunTrackInfo> toUpdateList = new ArrayList<>();
+
+        for (UpdateDocByIdVo req : reqVos) {
+            String requestId = req.getRequestId();
+            if (StringUtils.isEmpty(requestId)) continue;
+
+            // 解析时间
+            Date preResolveDate = null;
+            if (StringUtils.isNotEmpty(req.getPreResolveTime())) {
+                try {
+                    preResolveDate = simpleDateFormat.parse(req.getPreResolveTime());
+                } catch (ParseException e) {
+                    log.error("时间解析失败", e);
+                }
+            }
+
+            ApiRunTrackInfo existInfo = existMap.get(requestId);
+
+            if (existInfo == null) {
+                // --- 不存在，加入新增列表 ---
+                // 注意：防止 reqVos 里有重复的 ID 导致重复 insert，这里可以再做一个去重判断，或者相信前端
+                ApiRunTrackInfo newInfo = new ApiRunTrackInfo();
+                newInfo.setRequestId(requestId);
+                newInfo.setResult(req.getResult());
+                newInfo.setPreResolveTime(preResolveDate);
+                toInsertList.add(newInfo);
+            } else {
+                // --- 已存在，加入更新列表 ---
+                boolean needUpdate = false;
+                if (req.getResult() != null) {
+                    existInfo.setResult(req.getResult());
+                    needUpdate = true;
+                }
+                if (req.getPreResolveTime() != null) { // 只要传了字段，就更新时间
+                    existInfo.setPreResolveTime(preResolveDate);
+                    needUpdate = true;
+                }
+
+                if (needUpdate) {
+                    toUpdateList.add(existInfo);
+                }
+            }
+        }
+
+        // 4. 【批量执行】
+        if (!CollectionUtils.isEmpty(toInsertList)) {
+            // 批量新增 (1条 SQL 插入多行)
+            apiRunTrackInfoService.saveBatch(toInsertList);
+        }
+        if (!CollectionUtils.isEmpty(toUpdateList)) {
+            // 批量更新 (MyBatis Plus 会根据 ID 批量 update)
+            apiRunTrackInfoService.updateBatchById(toUpdateList);
+        }
+    }
+
     // 建议将 ObjectMapper 定义为类的静态成员或注入进来，避免循环内创建
     private static final com.fasterxml.jackson.databind.ObjectMapper objectMapper = new com.fasterxml.jackson.databind.ObjectMapper();
 
     public Map<String, Object> queryApiInfo(ApiInfoReq reqVo) {
         try {
-
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
             BoolQuery.Builder boolQueryBuilderLogs = new BoolQuery.Builder();
             List<Map<String, Object>> resultList = new ArrayList<>();
 
@@ -836,10 +931,35 @@ public class ApiTrackService {
 
             //执行查询
             SearchResponse<JsonNode> responseLogs = esCommonService.search(searchRequestLogs, JsonNode.class);
+            // 增加查询处理人逻辑
+            // ================== 【新增步骤 A：批量获取 MySQL 补充数据】 ==================
+            // 1. 收集本次查询所有的 requestId
+            List<String> requestIds = responseLogs.hits().hits().stream()
+                    .map(h -> h.source().path("requestId").asText())
+                    .filter(StringUtils::isNotEmpty)
+                    .collect(Collectors.toList());
+
+            // 2. 批量查询 MySQL (使用 MyBatis Plus 的 selectList)
+            Map<String, ApiRunTrackInfo> trackInfoMap = new HashMap<>();
+            if (!CollectionUtils.isEmpty(requestIds)) {
+                List<ApiRunTrackInfo> trackInfos = apiRunTrackInfoMapper.selectList(
+                        new QueryWrapper<ApiRunTrackInfo>().in("request_id", requestIds)
+                );
+                // 转为 Map 方便后续 O(1) 获取: key=requestId, value=Entity
+                trackInfoMap = trackInfos.stream()
+                        .collect(Collectors.toMap(ApiRunTrackInfo::getRequestId, v -> v, (k1, k2) -> k1));
+            }
+
+            // 3. 准备一个局部缓存，用于存储 "apiId_factory" -> "processorName" 的映射
+            // 避免循环中频繁查库，提升性能
+            Map<String, List<String>> processorCache = new HashMap<>();
+            // ================== 【新增步骤 A 结束】 ==================
+
             for (Hit<JsonNode> hit : responseLogs.hits().hits()) {
                 JsonNode source = hit.source();
                 Map<String, Object> item = new HashMap<>();
                 // 获取 requestBody 字符串
+                String requestId = source.path("requestId").asText();
                 String requestBodyStr = source.path("requestBody").asText();
 
                 item.put("responseBody", source.path("responseBody").asText());
@@ -848,6 +968,24 @@ public class ApiTrackService {
                 item.put("requestTime",source.path("requestTime").asText());
                 item.put("responseCode",source.path("responseCode").asText());
 
+                // ================== 【新增步骤 B：填充 MySQL 数据】 ==================
+                ApiRunTrackInfo trackInfo = trackInfoMap.get(requestId);
+                if (trackInfo != null) {
+                    // 1. 处理时间：Date -> String (保持与 ES 返回的 requestTime 格式一致)
+                    String timeStr = "";
+                    if (trackInfo.getPreResolveTime() != null) {
+                        timeStr = sdf.format(trackInfo.getPreResolveTime());
+                    }
+                    item.put("preResolveTime", timeStr);
+
+                    // 2. 处理结果
+                    item.put("result", trackInfo.getResult());
+                } else {
+                    // 没有查到数据时的默认值
+                    item.put("preResolveTime", "");
+                    item.put("result", "");
+                }
+                // ================== 【新增步骤 B 结束】 ==================
 
                 JsonNode apiBaseInfo = source.path("apiBaseInfo");
                 if (!apiBaseInfo.isMissingNode()) {
@@ -894,7 +1032,7 @@ public class ApiTrackService {
                                         }
                                     }
                                 }
-                            } else if ("SAP_012".equals(apiCode)) {
+                            } else if ("SAP_012".equals(apiCode) || "SAP_013".equals(apiCode)) {
                                 // 路径：IT_DATA -> item (数组) -> 注意小写
                                 JsonNode itData = bodyNode.path("IT_DATA");
                                 if (!itData.isMissingNode()) {
@@ -903,6 +1041,27 @@ public class ApiTrackService {
                                         JsonNode firstItem = items.get(0);
 
                                         // 1. 提取工厂
+                                        factory = firstItem.path("WERKS").asText("");
+
+                                        // 2. 提取订单号 (优先取 AUFNR，没有则取 EBELN)
+                                        String aufnr = firstItem.path("AUFNR").asText("");
+                                        String ebeln = firstItem.path("EBELN").asText("");
+
+                                        if (StringUtils.isNotEmpty(aufnr)) {
+                                            orderNumber = aufnr;
+                                        } else {
+                                            orderNumber = ebeln;
+                                        }
+                                    }
+                                }
+                            } else if ("SAP_009".equals(apiCode)) {
+                                JsonNode orderData = bodyNode.path("IT_ORDER_NUMBER");
+                                if (!orderData.isMissingNode()) {
+                                    JsonNode items = orderData.path("item"); // 小写 item
+                                    if (items.isArray() && items.size() > 0) {
+                                        JsonNode firstItem = items.get(0);
+
+                                        // 尝试提取工厂 (虽然你提供的报文里没看到，但写上不报错)
                                         factory = firstItem.path("WERKS").asText("");
 
                                         // 2. 提取订单号 (优先取 AUFNR，没有则取 EBELN)
@@ -927,6 +1086,41 @@ public class ApiTrackService {
                     apiInfoMap.put("factory", factory);
                     apiInfoMap.put("orderNumber", orderNumber); // 【新增】放入结果集
                     // =================== 【新增/修改逻辑结束】 ===================
+                    // ================== 【修改后的 Processor 获取逻辑】 ==================
+                    List<String> processorNames = new ArrayList<>();
+                    String errorName = reqVo.getErrorName();
+                    // 只有当 apiCode 和 factory 都有值时才去查
+                    if (StringUtils.isNotEmpty(apiCode) && StringUtils.isNotEmpty(factory)) {
+                        // 1. 【新增】确定 roleType
+                        // 默认为 technical (技术支持)
+                        String roleType = "technical";
+                        // 如果错误名称是 "业务失败"，则改为 business (业务支持)
+                        if ("业务失败".equals(errorName)) {
+                            roleType = "business";
+                        }
+
+                        // 2. 【修改】CacheKey 必须加上 roleType，防止不同角色的负责人混淆
+                        String cacheKey = apiCode + "_" + factory + "_" + roleType;
+
+                        // 3. 先查缓存
+                        if (processorCache.containsKey(cacheKey)) {
+                            processorNames = processorCache.get(cacheKey);
+                        } else {
+                            processorNames = apiApisMapper.queryUserNameByFactoryAndRole(apiCode, factory, roleType);
+
+                            // 防止数据库返回 null
+                            if (processorNames == null) {
+                                processorNames = new ArrayList<>();
+                            }
+
+                            // 5. 放入缓存
+                            processorCache.put(cacheKey, processorNames);
+                        }
+                    }
+
+                    // 设置到 item 或 apiInfoMap 中
+                    item.put("processor", processorNames); // 或者放在 apiInfo 里
+                    // ================== 【新增步骤 C 结束】 ==================
 
                     item.put("apiInfo", apiInfoMap);
                 } else {

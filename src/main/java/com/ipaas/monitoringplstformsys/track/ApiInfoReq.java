@@ -10,6 +10,7 @@ public class ApiInfoReq {
     private String startTime;
     private String endTime;
     private List<String> requestIds;
+    private String errorName;
 
     /**
      * 工厂 (WERKS)

@@ -305,7 +305,7 @@
         </dependency>
     </dependencies>
     <build>
-        <finalName>deipaas-custom-202512291122</finalName>
+        <finalName>deipaas-custom-202601082133</finalName>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
