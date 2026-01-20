@@ -1,6 +1,7 @@
 package com.ipaas.monitoringplstformsys.track.service;
 
 import cn.hutool.core.map.MapUtil;
+import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import co.elastic.clients.elasticsearch._types.FieldValue;
 import co.elastic.clients.elasticsearch._types.SortOrder;
 import co.elastic.clients.elasticsearch._types.aggregations.*;
@@ -884,15 +885,18 @@ public class ApiTrackService {
             BoolQuery.Builder boolQueryBuilderLogs = new BoolQuery.Builder();
             List<Map<String, Object>> resultList = new ArrayList<>();
 
+            // 局部缓存 (避免循环查库)
+            Map<String, List<String>> processorCache = new HashMap<>();
+
             boolQueryBuilderLogs.filter(f -> f.range(r -> r.date(n -> n.field(REQUEST_TIME).gte(reqVo.getStartTime()))));
             boolQueryBuilderLogs.filter(f -> f.range(r -> r.date(n -> n.field(REQUEST_TIME).lt(reqVo.getEndTime()))));
             //requestId精确查询
-            if (!CollectionUtils.isEmpty(reqVo.getRequestIds())) {
-                boolQueryBuilderLogs.filter(f -> f.terms(t -> t
-                        .field(REQUEST_ID)
-                        .terms(terms -> terms.value(reqVo.getRequestIds().stream().map(FieldValue::of).collect(Collectors.toList())))
-                ));
-            }
+//            if (!CollectionUtils.isEmpty(reqVo.getRequestIds())) {
+//                boolQueryBuilderLogs.filter(f -> f.terms(t -> t
+//                        .field(REQUEST_ID)
+//                        .terms(terms -> terms.value(reqVo.getRequestIds().stream().map(FieldValue::of).collect(Collectors.toList())))
+//                ));
+//            }
 
             // ================= 【修改后的搜索逻辑】 =================
 
@@ -922,220 +926,263 @@ public class ApiTrackService {
                 ));
             }
 
-            // ================= 【修改结束】 =================
-            SearchRequest searchRequestLogs = SearchRequest.of(sr -> sr
-                    .index(gateIndexName)  // 使用原始索引
-                    .query(q -> q.bool(boolQueryBuilderLogs.build()))
-                    .size(10000)  // 设置返回条数
-            );
+            Query query = new Query.Builder().bool(boolQueryBuilderLogs.build()).build();
 
-            //执行查询
-            SearchResponse<JsonNode> responseLogs = esCommonService.search(searchRequestLogs, JsonNode.class);
-            // 增加查询处理人逻辑
-            // ================== 【新增步骤 A：批量获取 MySQL 补充数据】 ==================
-            // 1. 收集本次查询所有的 requestId
-            List<String> requestIds = responseLogs.hits().hits().stream()
-                    .map(h -> h.source().path("requestId").asText())
-                    .filter(StringUtils::isNotEmpty)
-                    .collect(Collectors.toList());
+            // ================= 【开始循环查询逻辑】 =================
+            List<FieldValue> searchAfterValues = null; // 游标
+            int pageSize = 2000; // 每次查 2000 条，分批拉取
+            long totalHits = 0;  // 总条数
 
-            // 2. 批量查询 MySQL (使用 MyBatis Plus 的 selectList)
-            Map<String, ApiRunTrackInfo> trackInfoMap = new HashMap<>();
-            if (!CollectionUtils.isEmpty(requestIds)) {
-                List<ApiRunTrackInfo> trackInfos = apiRunTrackInfoMapper.selectList(
-                        new QueryWrapper<ApiRunTrackInfo>().in("request_id", requestIds)
-                );
-                // 转为 Map 方便后续 O(1) 获取: key=requestId, value=Entity
-                trackInfoMap = trackInfos.stream()
-                        .collect(Collectors.toMap(ApiRunTrackInfo::getRequestId, v -> v, (k1, k2) -> k1));
-            }
+            while (true) {
+                // 2. 构建 Search Request
+                SearchRequest.Builder requestBuilder = new SearchRequest.Builder()
+                        .index(gateIndexName)
+                        .query(query)
+                        .size(pageSize)
+                        // 【关键】必须要有确定的排序，才能深分页
+                        .sort(s -> s.field(f -> f.field("requestTime").order(SortOrder.Desc)))
+                        .sort(s -> s.field(f -> f.field("_id").order(SortOrder.Desc))); // _id 兜底保证唯一性
 
-            // 3. 准备一个局部缓存，用于存储 "apiId_factory" -> "processorName" 的映射
-            // 避免循环中频繁查库，提升性能
-            Map<String, List<String>> processorCache = new HashMap<>();
-            // ================== 【新增步骤 A 结束】 ==================
-
-            for (Hit<JsonNode> hit : responseLogs.hits().hits()) {
-                JsonNode source = hit.source();
-                Map<String, Object> item = new HashMap<>();
-                // 获取 requestBody 字符串
-                String requestId = source.path("requestId").asText();
-                String requestBodyStr = source.path("requestBody").asText();
-
-                item.put("responseBody", source.path("responseBody").asText());
-                item.put("requestBody", source.path("requestBody").asText());
-                item.put("requestId", source.path("requestId").asText());
-                item.put("requestTime",source.path("requestTime").asText());
-                item.put("responseCode",source.path("responseCode").asText());
-
-                // ================== 【新增步骤 B：填充 MySQL 数据】 ==================
-                ApiRunTrackInfo trackInfo = trackInfoMap.get(requestId);
-                if (trackInfo != null) {
-                    // 1. 处理时间：Date -> String (保持与 ES 返回的 requestTime 格式一致)
-                    String timeStr = "";
-                    if (trackInfo.getPreResolveTime() != null) {
-                        timeStr = sdf.format(trackInfo.getPreResolveTime());
-                    }
-                    item.put("preResolveTime", timeStr);
-
-                    // 2. 处理结果
-                    item.put("result", trackInfo.getResult());
-                } else {
-                    // 没有查到数据时的默认值
-                    item.put("preResolveTime", "");
-                    item.put("result", "");
+                // 如果有游标，传给 ES，查下一页
+                if (searchAfterValues != null) {
+                    requestBuilder.searchAfter(searchAfterValues);
                 }
-                // ================== 【新增步骤 B 结束】 ==================
 
-                JsonNode apiBaseInfo = source.path("apiBaseInfo");
-                if (!apiBaseInfo.isMissingNode()) {
-                    // 创建包含 API 详细信息的 Map
-                    Map<String, Object> apiInfoMap = new HashMap<>();
-                    String apiCode = apiBaseInfo.path("apiCode").asText(); // 获取 apiCode
+                // 3. 执行查询
+                SearchResponse<JsonNode> responseLogs = esCommonService.search(requestBuilder.build(), JsonNode.class);
+                List<Hit<JsonNode>> hits = responseLogs.hits().hits();
 
-                    apiInfoMap.put("apiId", apiBaseInfo.path("apiId").asText());
-                    apiInfoMap.put("apiCode", apiBaseInfo.path("apiCode").asText());
-                    apiInfoMap.put("apiName", apiBaseInfo.path("apiName").asText());
-                    apiInfoMap.put("apiType", apiBaseInfo.path("apiType").asText());
-                    apiInfoMap.put("apiVersion", apiBaseInfo.path("apiVersion").asText());
-                    apiInfoMap.put("categoryId", apiBaseInfo.path("categoryId").asText());
-                    apiInfoMap.put("categoryCode", apiBaseInfo.path("categoryCode").asText());
-                    apiInfoMap.put("categoryName", apiBaseInfo.path("categoryName").asText());
-
-                    // =================== 【新增/修改逻辑开始】 ===================
-                    String factory = "";
-                    String orderNumber = ""; // 【新增】订单号字段
-
-                    if (StringUtils.isNotEmpty(requestBodyStr) && StringUtils.isNotEmpty(apiCode)) {
-                        try {
-                            JsonNode bodyNode = objectMapper.readTree(requestBodyStr);
-
-                            if ("SAP_008".equals(apiCode)) {
-                                // 路径：IV_DATA -> ITEM (数组)
-                                JsonNode ivData = bodyNode.path("IV_DATA");
-                                if (!ivData.isMissingNode()) {
-                                    JsonNode items = ivData.path("ITEM");
-                                    if (items.isArray() && items.size() > 0) {
-                                        JsonNode firstItem = items.get(0);
-
-                                        // 1. 提取工厂
-                                        factory = firstItem.path("WERKS").asText("");
-
-                                        // 2. 提取订单号 (优先取 AUFNR，没有则取 EBELN)
-                                        String aufnr = firstItem.path("AUFNR").asText("");
-                                        String ebeln = firstItem.path("EBELN").asText("");
-
-                                        if (StringUtils.isNotEmpty(aufnr)) {
-                                            orderNumber = aufnr;
-                                        } else {
-                                            orderNumber = ebeln;
-                                        }
-                                    }
-                                }
-                            } else if ("SAP_012".equals(apiCode) || "SAP_013".equals(apiCode)) {
-                                // 路径：IT_DATA -> item (数组) -> 注意小写
-                                JsonNode itData = bodyNode.path("IT_DATA");
-                                if (!itData.isMissingNode()) {
-                                    JsonNode items = itData.path("item");
-                                    if (items.isArray() && items.size() > 0) {
-                                        JsonNode firstItem = items.get(0);
-
-                                        // 1. 提取工厂
-                                        factory = firstItem.path("WERKS").asText("");
-
-                                        // 2. 提取订单号 (优先取 AUFNR，没有则取 EBELN)
-                                        String aufnr = firstItem.path("AUFNR").asText("");
-                                        String ebeln = firstItem.path("EBELN").asText("");
-
-                                        if (StringUtils.isNotEmpty(aufnr)) {
-                                            orderNumber = aufnr;
-                                        } else {
-                                            orderNumber = ebeln;
-                                        }
-                                    }
-                                }
-                            } else if ("SAP_009".equals(apiCode)) {
-                                JsonNode orderData = bodyNode.path("IT_ORDER_NUMBER");
-                                if (!orderData.isMissingNode()) {
-                                    JsonNode items = orderData.path("item"); // 小写 item
-                                    if (items.isArray() && items.size() > 0) {
-                                        JsonNode firstItem = items.get(0);
-
-                                        // 尝试提取工厂 (虽然你提供的报文里没看到，但写上不报错)
-                                        factory = firstItem.path("WERKS").asText("");
-
-                                        // 2. 提取订单号 (优先取 AUFNR，没有则取 EBELN)
-                                        String aufnr = firstItem.path("AUFNR").asText("");
-                                        String ebeln = firstItem.path("EBELN").asText("");
-
-                                        if (StringUtils.isNotEmpty(aufnr)) {
-                                            orderNumber = aufnr;
-                                        } else {
-                                            orderNumber = ebeln;
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (Exception e) {
-                            // 解析失败不阻断主流程
-                            log.warn("解析报文提取字段失败, apiCode: {}, requestId: {}", apiCode, source.path("requestId").asText());
-                        }
-                    }
-
-                    // 将提取到的值放入 map
-                    apiInfoMap.put("factory", factory);
-                    apiInfoMap.put("orderNumber", orderNumber); // 【新增】放入结果集
-                    // =================== 【新增/修改逻辑结束】 ===================
-                    // ================== 【修改后的 Processor 获取逻辑】 ==================
-                    List<String> processorNames = new ArrayList<>();
-                    String errorName = reqVo.getErrorName();
-                    // 只有当 apiCode 和 factory 都有值时才去查
-                    if (StringUtils.isNotEmpty(apiCode) && StringUtils.isNotEmpty(factory)) {
-                        // 1. 【新增】确定 roleType
-                        // 默认为 technical (技术支持)
-                        String roleType = "technical";
-                        // 如果错误名称是 "业务失败"，则改为 business (业务支持)
-                        if ("业务失败".equals(errorName)) {
-                            roleType = "business";
-                        }
-
-                        // 2. 【修改】CacheKey 必须加上 roleType，防止不同角色的负责人混淆
-                        String cacheKey = apiCode + "_" + factory + "_" + roleType;
-
-                        // 3. 先查缓存
-                        if (processorCache.containsKey(cacheKey)) {
-                            processorNames = processorCache.get(cacheKey);
-                        } else {
-                            processorNames = apiApisMapper.queryUserNameByFactoryAndRole(apiCode, factory, roleType);
-
-                            // 防止数据库返回 null
-                            if (processorNames == null) {
-                                processorNames = new ArrayList<>();
-                            }
-
-                            // 5. 放入缓存
-                            processorCache.put(cacheKey, processorNames);
-                        }
-                    }
-
-                    // 设置到 item 或 apiInfoMap 中
-                    item.put("processor", processorNames); // 或者放在 apiInfo 里
-                    // ================== 【新增步骤 C 结束】 ==================
-
-                    item.put("apiInfo", apiInfoMap);
-                } else {
-                    item.put("apiInfo", Collections.emptyMap());
+                // 记录总数 (第一次查的时候拿 total)
+                if (searchAfterValues == null) {
+                    totalHits = responseLogs.hits().total().value();
                 }
-                resultList.add(item);
+
+                // 如果没查到数据，跳出循环
+                if (CollectionUtils.isEmpty(hits)) {
+                    break;
+                }
+
+                // ================== 【批量处理 MySQL 数据 (当前批次)】 ==================
+                // 收集当前批次的 requestIds
+                List<String> requestIds = hits.stream()
+                        .map(h -> h.source().path("requestId").asText())
+                        .filter(StringUtils::isNotEmpty)
+                        .collect(Collectors.toList());
+
+                // 批量查询 MySQL
+                Map<String, ApiRunTrackInfo> trackInfoMap = new HashMap<>();
+                if (!CollectionUtils.isEmpty(requestIds)) {
+                    List<ApiRunTrackInfo> trackInfos = apiRunTrackInfoMapper.selectList(
+                            new QueryWrapper<ApiRunTrackInfo>().in("request_id", requestIds)
+                    );
+                    trackInfoMap = trackInfos.stream()
+                            .collect(Collectors.toMap(ApiRunTrackInfo::getRequestId, v -> v, (k1, k2) -> k1));
+                }
+                // ================== 【批量处理结束】 ==================
+
+                // 4. 处理数据解析 (循环当前批次)
+                for (Hit<JsonNode> hit : hits) {
+                    JsonNode source = hit.source();
+                    Map<String, Object> item = new HashMap<>();
+
+                    String requestId = source.path("requestId").asText();
+                    String requestBodyStr = source.path("requestBody").asText();
+
+                    // 填充基础字段
+                    item.put("responseBody", source.path("responseBody").asText());
+                    item.put("requestBody", requestBodyStr);
+                    item.put("requestId", requestId);
+                    item.put("requestTime", source.path("requestTime").asText());
+                    item.put("responseCode", source.path("responseCode").asText());
+
+                    // 填充 MySQL 数据
+                    ApiRunTrackInfo trackInfo = trackInfoMap.get(requestId);
+                    if (trackInfo != null) {
+                        String timeStr = "";
+                        if (trackInfo.getPreResolveTime() != null) {
+                            timeStr = sdf.format(trackInfo.getPreResolveTime());
+                        }
+                        item.put("preResolveTime", timeStr);
+                        item.put("result", trackInfo.getResult());
+                    } else {
+                        item.put("preResolveTime", "");
+                        item.put("result", "");
+                    }
+
+                    // 解析 API Info
+                    JsonNode apiBaseInfo = source.path("apiBaseInfo");
+                    if (!apiBaseInfo.isMissingNode()) {
+                        Map<String, Object> apiInfoMap = new HashMap<>();
+                        String apiCode = apiBaseInfo.path("apiCode").asText();
+
+                        // 填充 API 基础信息
+                        apiInfoMap.put("apiId", apiBaseInfo.path("apiId").asText());
+                        apiInfoMap.put("apiCode", apiCode);
+                        apiInfoMap.put("apiName", apiBaseInfo.path("apiName").asText());
+                        apiInfoMap.put("categoryName", apiBaseInfo.path("categoryName").asText());
+
+                        // --- 解析报文提取 Factory 和 OrderNumber ---
+                        String factory = "";
+                        String orderNumber = "";
+
+                        if (StringUtils.isNotEmpty(requestBodyStr) && StringUtils.isNotEmpty(apiCode)) {
+                            try {
+                                JsonNode bodyNode = objectMapper.readTree(requestBodyStr);
+                                if ("SAP_008".equals(apiCode)) {
+                                    // 路径：IV_DATA -> ITEM (数组)
+                                    JsonNode ivData = bodyNode.path("IV_DATA");
+                                    if (!ivData.isMissingNode()) {
+                                        JsonNode items = ivData.path("ITEM");
+                                        if (items.isArray() && items.size() > 0) {
+                                            JsonNode firstItem = items.get(0);
+
+                                            // 1. 提取工厂
+                                            factory = firstItem.path("WERKS").asText("");
+
+                                            // 2. 提取订单号 (优先取 AUFNR，没有则取 EBELN)
+                                            String aufnr = firstItem.path("AUFNR").asText("");
+                                            String ebeln = firstItem.path("EBELN").asText("");
+
+                                            if (StringUtils.isNotEmpty(aufnr)) {
+                                                orderNumber = aufnr;
+                                            } else {
+                                                orderNumber = ebeln;
+                                            }
+                                        }
+                                    }
+                                } else if ("SAP_012".equals(apiCode) || "SAP_013".equals(apiCode)) {
+                                    // 路径：IT_DATA -> item (数组) -> 注意小写
+                                    JsonNode itData = bodyNode.path("IT_DATA");
+                                    if (!itData.isMissingNode()) {
+                                        JsonNode items = itData.path("item");
+                                        if (items.isArray() && items.size() > 0) {
+                                            JsonNode firstItem = items.get(0);
+
+                                            // 1. 提取工厂
+                                            factory = firstItem.path("WERKS").asText("");
+
+                                            // 2. 提取订单号 (优先取 AUFNR，没有则取 EBELN)
+                                            String aufnr = firstItem.path("AUFNR").asText("");
+                                            String ebeln = firstItem.path("EBELN").asText("");
+
+                                            if (StringUtils.isNotEmpty(aufnr)) {
+                                                orderNumber = aufnr;
+                                            } else {
+                                                orderNumber = ebeln;
+                                            }
+                                        }
+                                    }
+                                } else if ("SAP_009".equals(apiCode)) {
+                                    JsonNode orderData = bodyNode.path("IT_ORDER_NUMBER");
+                                    if (!orderData.isMissingNode()) {
+                                        JsonNode items = orderData.path("item"); // 小写 item
+                                        if (items.isArray() && items.size() > 0) {
+                                            JsonNode firstItem = items.get(0);
+
+                                            // 尝试提取工厂 (虽然你提供的报文里没看到，但写上不报错)
+                                            factory = firstItem.path("WERKS").asText("");
+
+                                            // 2. 提取订单号 (优先取 AUFNR，没有则取 EBELN)
+                                            String aufnr = firstItem.path("AUFNR").asText("");
+                                            String ebeln = firstItem.path("EBELN").asText("");
+
+                                            if (StringUtils.isNotEmpty(aufnr)) {
+                                                orderNumber = aufnr;
+                                            } else {
+                                                orderNumber = ebeln;
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch (Exception e) {
+                                // 解析失败不阻断主流程
+                                log.warn("解析报文提取字段失败, apiCode: {}, requestId: {}", apiCode, source.path("requestId").asText());
+                            }
+                        }
+
+
+                        // 将提取到的值放入 map
+                        apiInfoMap.put("factory", factory);
+                        apiInfoMap.put("orderNumber", orderNumber); // 【新增】放入结果集
+
+                        List<String> processorNames = new ArrayList<>();
+
+                        if (StringUtils.isNotEmpty(apiCode) && StringUtils.isNotEmpty(factory)) {
+                            // 【修正】这里建议使用 bizState 动态判断 roleType，
+                            // 但如果你非要用 reqVo.getErrorName()，也可以，但注意这是针对所有行生效
+                            String roleType = "technical";
+                            // 建议逻辑：优先看当前行的 bizState，如果没逻辑则看 reqVo
+                            if ("业务失败".equals(reqVo.getErrorName())) {
+                                roleType = "business";
+                            } else {
+                                // 更好的做法：检查当前行的 bizState
+//                                JsonNode bizState = source.path("bizState");
+//                                if (!bizState.isMissingNode()) {
+//                                    JsonNode stateNode = bizState.isArray() && bizState.size() > 0 ? bizState.get(0) : bizState;
+//                                    String stateName = stateNode.path("stateInfoName").asText();
+//                                    if (StringUtils.isNotEmpty(stateName) && !"业务成功".equals(stateName)) {
+                                        roleType = "business";
+//                                    }
+//                                }
+                            }
+
+                            String cacheKey = apiCode + "_" + factory + "_" + roleType;
+                            if (processorCache.containsKey(cacheKey)) {
+                                processorNames = processorCache.get(cacheKey);
+                            } else {
+                                processorNames = apiApisMapper.queryUserNameByFactoryAndRole(apiCode, factory, roleType);
+                                if (processorNames == null) processorNames = new ArrayList<>();
+                                processorCache.put(cacheKey, processorNames);
+                            }
+                        }
+                        item.put("processor", processorNames);
+
+                        item.put("apiInfo", apiInfoMap);
+                    } else {
+                        item.put("apiInfo", Collections.emptyMap());
+                    }
+                    resultList.add(item);
+                }
+
+                // 5. 更新游标，准备查下一页
+                Hit<JsonNode> lastHit = hits.get(hits.size() - 1);
+                List<FieldValue> sortValues = lastHit.sort(); // 获取 sort 数组
+                if (sortValues != null && !sortValues.isEmpty()) {
+                    // 【修改点 2】直接赋值，不需要再用 stream().map(...) 转换了
+                    searchAfterValues = sortValues;
+                } else {
+                    break; // 没有 sort 值，无法继续
+                }
+
+                // 如果本次查回来的少于 pageSize，说明是最后一页了
+                if (hits.size() < pageSize) {
+                    break;
+                }
+
+                // 【安全阀】防止内存溢出，如果数据量太大(比如 > 5万)，强制停止
+                if (resultList.size() >= 50000) {
+                    log.warn("查询数据量过大，已截断至 50000 条");
+                    break;
+                }
             }
+            // ================= 【循环查询结束】 =================
 
             Map<String, Object> result = new HashMap<>();
-            result.put("total", responseLogs.hits().total().value());
+            result.put("total", totalHits);
             result.put("data", resultList);
             return result;
 
+        } catch (ElasticsearchException esEx) {
+            // 【关键】打印 ES 返回的具体错误原因
+            log.error("ES查询详细报错: {}", esEx.response().error().reason());
+            if (esEx.response().error().rootCause() != null) {
+                esEx.response().error().rootCause().forEach(cause -> {
+                    log.error("Root Cause: Type=[{}], Reason=[{}]", cause.type(), cause.reason());
+                });
+            }
+            throw new XdapWarningException(DeipaasExceptionEnum.SEARCH_FAIL, esEx);
         } catch (Exception e) {
-            log.error("queryApiInfo：" , e);
+            log.error("queryApiInfo unknown error", e);
             throw new XdapWarningException(DeipaasExceptionEnum.SEARCH_FAIL, e);
         }
     }

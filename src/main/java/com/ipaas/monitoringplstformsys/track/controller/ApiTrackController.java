@@ -1,6 +1,7 @@
 package com.ipaas.monitoringplstformsys.track.controller;
 
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ipaas.monitoringplstformsys.common.response.Response;
 import com.ipaas.monitoringplstformsys.track.AggResultSearchReq;
 import com.ipaas.monitoringplstformsys.track.ApiInfoReq;
@@ -12,6 +13,7 @@ import org.springframework.web.bind.annotation.*;
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletResponse;
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/es")
@@ -45,8 +47,18 @@ public class ApiTrackController {
     }
 
     @PostMapping("/queryApiInfo")
-    public Response queryApiInfo(@RequestBody ApiInfoReq reqVo){
-        return Response.ok().setData(apiTrackService.queryApiInfo(reqVo));
+    public Response queryApiInfo(@RequestBody Map<String, Object> rawMap){
+        // 2. 在这一行打断点
+        System.out.println(rawMap);
+
+        // 3. 这里的 debug 就能看到前端传来的所有 key-value，包括你没定义的
+
+        // 为了不破坏后面代码，可以手动转回去（可选）
+         ApiInfoReq reqVo = new ObjectMapper().convertValue(rawMap, ApiInfoReq.class);
+         return Response.ok().setData(apiTrackService.queryApiInfo(reqVo));
+
+//        return null; // 临时测试完就还原代码
+//        return Response.ok().setData(apiTrackService.queryApiInfo(reqVo));
     }
 
     @PostMapping("/ApiInfoExport")
