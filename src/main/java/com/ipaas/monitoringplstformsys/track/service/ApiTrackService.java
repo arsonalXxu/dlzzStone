@@ -5,7 +5,9 @@ import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import co.elastic.clients.elasticsearch._types.FieldValue;
 import co.elastic.clients.elasticsearch._types.SortOrder;
 import co.elastic.clients.elasticsearch._types.aggregations.*;
-import co.elastic.clients.elasticsearch._types.query_dsl.*;
+import co.elastic.clients.elasticsearch._types.query_dsl.BoolQuery;
+import co.elastic.clients.elasticsearch._types.query_dsl.NestedQuery;
+import co.elastic.clients.elasticsearch._types.query_dsl.Query;
 import co.elastic.clients.elasticsearch.core.GetResponse;
 import co.elastic.clients.elasticsearch.core.SearchRequest;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
@@ -19,35 +21,33 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.ipaas.monitoringplstformsys.common.constant.DeipaasExceptionEnum;
 import com.ipaas.monitoringplstformsys.common.exception.base.XdapWarningException;
+import com.ipaas.monitoringplstformsys.elasticsearch.dto.EsSearchBaseBo;
+import com.ipaas.monitoringplstformsys.elasticsearch.dto.EsUpdateBaseBo;
+import com.ipaas.monitoringplstformsys.elasticsearch.service.EsCommonService;
+import com.ipaas.monitoringplstformsys.mapper.ApiApisMapper;
+import com.ipaas.monitoringplstformsys.mapper.ApiDictionaryMapper;
 import com.ipaas.monitoringplstformsys.mapper.ApiRunTrackInfoMapper;
 import com.ipaas.monitoringplstformsys.mapper.IApiRunTrackInfoService;
 import com.ipaas.monitoringplstformsys.module.ApiRunTrackInfo;
+import com.ipaas.monitoringplstformsys.module.vo.SearchByCategoryDto;
+import com.ipaas.monitoringplstformsys.service.ApiService;
 import com.ipaas.monitoringplstformsys.track.AggResultSearchReq;
 import com.ipaas.monitoringplstformsys.track.AggregationResult;
+import com.ipaas.monitoringplstformsys.track.ApiErrorAnalysisReq;
 import com.ipaas.monitoringplstformsys.track.ApiInfoReq;
-import com.ipaas.monitoringplstformsys.track.dto.AggregationResultComposite;
-import com.ipaas.monitoringplstformsys.track.dto.AggregationResultDto;
-import com.ipaas.monitoringplstformsys.track.dto.ApiConsumerStat;
-import com.ipaas.monitoringplstformsys.track.dto.ApiRunReportsDto;
+import com.ipaas.monitoringplstformsys.track.dto.*;
 import com.ipaas.monitoringplstformsys.track.util.AggregationResultNewProcessor;
 import com.ipaas.monitoringplstformsys.track.util.AggregationResultProcessor;
 import com.ipaas.monitoringplstformsys.track.vo.ApiInfoExportVO;
 import com.ipaas.monitoringplstformsys.track.vo.HitResultVo;
 import com.ipaas.monitoringplstformsys.track.vo.UpdateDocByIdVo;
-import com.ipaas.monitoringplstformsys.elasticsearch.dto.EsSearchBaseBo;
-import com.ipaas.monitoringplstformsys.elasticsearch.dto.EsUpdateBaseBo;
-import com.ipaas.monitoringplstformsys.elasticsearch.service.EsCommonService;
-import com.ipaas.monitoringplstformsys.mapper.ApiApisMapper;
-import com.ipaas.monitoringplstformsys.module.vo.SearchByCategoryDto;
-import com.ipaas.monitoringplstformsys.service.ApiService;
-import org.apache.commons.lang3.StringUtils;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
-
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletResponse;
@@ -60,8 +60,6 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.stream.Collectors;
-
-import static com.ipaas.monitoringplstformsys.common.constant.DeipaasExceptionEnum.SEARCH_FAIL;
 
 @Service
 @Slf4j
@@ -87,6 +85,9 @@ public class ApiTrackService {
 
     @Resource
     private ApiRunTrackInfoMapper apiRunTrackInfoMapper;
+
+    @Resource
+    private ApiDictionaryMapper apiDictionaryMapper;
 
     @Resource
     private IApiRunTrackInfoService apiRunTrackInfoService;
@@ -260,7 +261,7 @@ public class ApiTrackService {
             });
 
         } catch (Exception e) {
-            log.error("queryApiUsageStats error:" , e);
+            log.error("queryApiUsageStats error:", e);
             throw new XdapWarningException(DeipaasExceptionEnum.SEARCH_FAIL, e);
         }
     }
@@ -427,23 +428,23 @@ public class ApiTrackService {
 
         // 业务错误名称聚合
         Aggregation bizErrorNamesAgg = Aggregation.of(a -> a
-                        .nested(n -> n.path("bizState"))
-                        .aggregations("state_names", Aggregation.of(aa -> aa
-                                        .terms(t -> t.field("bizState.stateInfoName.keyword")
-                                                        .size(10000)
-                                                .missing("未识别")
+                .nested(n -> n.path("bizState"))
+                .aggregations("state_names", Aggregation.of(aa -> aa
+                        .terms(t -> t.field("bizState.stateInfoName.keyword")
+                                .size(10000)
+                                .missing("未识别")
+                        )
+                        .aggregations("back_to_root", Aggregation.of(rn -> rn
+                                .reverseNested(r -> r) // 从bizState嵌套对象切换回主文档
+                                // 在主文档上下文中聚合requestId
+                                .aggregations("errorRequestId", Aggregation.of(subAgg -> subAgg
+                                        .terms(termsAgg -> termsAgg
+                                                .field("requestId") // 注意使用keyword子字段
+                                                .size(10000)
                                         )
-                                .aggregations("back_to_root", Aggregation.of(rn -> rn
-                                        .reverseNested(r -> r) // 从bizState嵌套对象切换回主文档
-                                        // 在主文档上下文中聚合requestId
-                                        .aggregations("errorRequestId", Aggregation.of(subAgg -> subAgg
-                                                .terms(termsAgg -> termsAgg
-                                                        .field("requestId") // 注意使用keyword子字段
-                                                        .size(10000)
-                                                )
-                                        ))
                                 ))
                         ))
+                ))
         );
 
 //
@@ -559,11 +560,11 @@ public class ApiTrackService {
 
             // API名称模糊查询
             if (org.springframework.util.StringUtils.hasText(reqVo.getApiName())) {
-                    boolQueryBuilder.must(m -> m.wildcard(w -> w
-                            .field("apiName.keyword")
-                            .value("*" + reqVo.getApiName() + "*")
-                    ));
-                }
+                boolQueryBuilder.must(m -> m.wildcard(w -> w
+                        .field("apiName.keyword")
+                        .value("*" + reqVo.getApiName() + "*")
+                ));
+            }
 
             // 应用系统查询 (模糊匹配)
             if (org.springframework.util.StringUtils.hasText(reqVo.getCategory())) {
@@ -650,13 +651,13 @@ public class ApiTrackService {
                 aggregationResultDto.setAllRequestIds(allRequestIds);
                 aggregationResultDto.setTotalCalls(totalCalls);
                 aggregationResultDto.setErrorCount(errorCount);
-                if ("业务失败".equals(baseInfo.getErrorName())){
+                if ("业务失败".equals(baseInfo.getErrorName())) {
                     String roleType = "business";
-                    aggregationResultDto.setProcessor(apiApisMapper.queryProcessorByRoleType(aggregationResultDto.getApiCode(),roleType));
+                    aggregationResultDto.setProcessor(apiApisMapper.queryProcessorByRoleType(aggregationResultDto.getApiCode(), roleType));
 
-                }else{
+                } else {
                     String roleType = "technical";
-                    aggregationResultDto.setProcessor(apiApisMapper.queryProcessorByRoleType(aggregationResultDto.getApiCode(),roleType));
+                    aggregationResultDto.setProcessor(apiApisMapper.queryProcessorByRoleType(aggregationResultDto.getApiCode(), roleType));
 
                 }
                 aggregationResultDtoList.add(aggregationResultDto);
@@ -665,10 +666,10 @@ public class ApiTrackService {
 
             if (reqVo.getSortField() != null) {
                 Comparator<AggregationResultDto> comparator = null;
-                if (ERROR_COUNT.equals(reqVo.getSortField())){
+                if (ERROR_COUNT.equals(reqVo.getSortField())) {
                     comparator = Comparator.comparingLong(AggregationResultDto::getErrorCount);
                 }
-                if(TOTAL_COUNT.equals(reqVo.getSortField())){
+                if (TOTAL_COUNT.equals(reqVo.getSortField())) {
                     comparator = Comparator.comparingLong(AggregationResultDto::getTotalCalls);
                 }
                 // 判断排序方向
@@ -685,7 +686,7 @@ public class ApiTrackService {
             return result;
 
         } catch (Exception e) {
-            log.error("queryAggregationResult：" , e);
+            log.error("queryAggregationResult：", e);
             throw new XdapWarningException(DeipaasExceptionEnum.SEARCH_FAIL, e);
         }
     }
@@ -786,7 +787,7 @@ public class ApiTrackService {
                     }
                     esCommonService.save(targetIndexName, t, aggregationResult);
                 } catch (IOException e) {
-                    log.error("saveDocumentById：" , e);
+                    log.error("saveDocumentById：", e);
                     throw new RuntimeException(e);
                 }
             });
@@ -883,289 +884,318 @@ public class ApiTrackService {
         try {
             SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
             BoolQuery.Builder boolQueryBuilderLogs = new BoolQuery.Builder();
-            List<Map<String, Object>> resultList = new ArrayList<>();
-
-            // 局部缓存 (避免循环查库)
-            Map<String, List<String>> processorCache = new HashMap<>();
 
             boolQueryBuilderLogs.filter(f -> f.range(r -> r.date(n -> n.field(REQUEST_TIME).gte(reqVo.getStartTime()))));
             boolQueryBuilderLogs.filter(f -> f.range(r -> r.date(n -> n.field(REQUEST_TIME).lt(reqVo.getEndTime()))));
             //requestId精确查询
-//            if (!CollectionUtils.isEmpty(reqVo.getRequestIds())) {
-//                boolQueryBuilderLogs.filter(f -> f.terms(t -> t
-//                        .field(REQUEST_ID)
-//                        .terms(terms -> terms.value(reqVo.getRequestIds().stream().map(FieldValue::of).collect(Collectors.toList())))
-//                ));
-//            }
 
-            // ================= 【修改后的搜索逻辑】 =================
+            // ================= 【新增：条件透传查询】 =================
+
+            // 3. API Code 精确匹配
+            if (StringUtils.isNotBlank(reqVo.getApiCode())) {
+                boolQueryBuilderLogs.filter(f -> f.term(t -> t
+                        // 【修改点】加上 apiBaseInfo. 前缀
+                        .field("apiBaseInfo.apiCode.keyword")
+                        .value(reqVo.getApiCode())
+                ));
+            }
+
+            // 4. Consumer Code 精确匹配
+
+            // 5. Category Code 精确匹配
+            if (StringUtils.isNotBlank(reqVo.getCategoryCode())) {
+                boolQueryBuilderLogs.filter(f -> f.term(t -> t
+                        // 【修改点】也加上前缀
+                        .field("apiBaseInfo.categoryCode.keyword")
+                        .value(reqVo.getCategoryCode())
+                ));
+            }
+
+            // 6. 结果状态筛选 (Result / ErrorName)
+            // 这是一个难点，因为原始日志里可能没有 resultStatusList 这种聚合后的字段
+            // 你需要根据 responseCode 或 bizState 来还原筛选逻辑
+            if (!CollectionUtils.isEmpty(reqVo.getResultStatusList())) {
+                BoolQuery.Builder statusBool = new BoolQuery.Builder();
+
+                for (String status : reqVo.getResultStatusList()) {
+                    if ("成功".equals(status)) {
+                        // 【成功】定义：
+                        // 1. HTTP 状态码是 2xx
+                        // 2. 并且 (bizState 不存在 OR bizState 等于 "业务成功")
+                        statusBool.should(s -> s.bool(b -> b
+                                .must(m -> m.prefix(p -> p.field("responseCode").value("2")))
+                                .must(m -> m.bool(sub -> sub
+                                        // 情况A: 没有业务状态字段 (认为成功)
+                                        .should(sh -> sh.bool(bb -> bb.mustNot(mn -> mn.exists(e -> e.field("bizState.stateInfoName.keyword")))))
+                                        // 情况B: 有业务状态，且显式为 "业务成功"
+                                        .should(sh -> sh.term(t -> t.field("bizState.stateInfoName.keyword").value("业务成功")))
+                                        .minimumShouldMatch("1")
+                                ))
+                        ));
+                    } else if ("业务失败".equals(status)) {
+                        // 【业务失败】定义：
+                        // 1. HTTP 状态码是 2xx
+                        // 2. 并且 (bizState 存在 且 不等于 "业务成功")
+                        statusBool.should(s -> s.bool(b -> b
+                                .must(m -> m.prefix(p -> p.field("responseCode").value("2")))
+                                .must(m -> m.bool(sub -> sub
+                                        // 情况A：标准的 bizState 错误 (如果有这个字段)
+                                        .should(sh -> sh.bool(bb -> bb
+                                                .must(mm -> mm.exists(e -> e.field("bizState.stateInfoName.keyword")))
+                                                .mustNot(mn -> mn.term(t -> t.field("bizState.stateInfoName.keyword").value("业务成功")))
+                                        ))
+                                        // 情况B：Response Body 里包含明确的错误标识 (针对你这条数据)
+                                        // 匹配 "CODE":"E"
+                                        .should(sh -> sh.matchPhrase(mp -> mp.field("responseBody").query("CODE E")))
+                                        .minimumShouldMatch("1")
+                                ))
+                        ));
+                    } else {
+                        // 【技术失败】定义：HTTP 状态码 不是 2xx
+                        statusBool.should(s -> s.bool(b -> b
+                                .mustNot(mn -> mn.prefix(p -> p.field("responseCode").value("2")))
+                        ));
+                    }
+                }
+                statusBool.minimumShouldMatch("1");
+                boolQueryBuilderLogs.filter(f -> f.bool(statusBool.build()));
+            } else if (StringUtils.isNotBlank(reqVo.getErrorName())) {
+                String errorName = reqVo.getErrorName().trim();
+
+                if ("业务失败".equals(errorName)) {
+                    // 1. 【业务失败】(逻辑必须与 resultStatusList 中完全一致)
+                    boolQueryBuilderLogs.filter(f -> f.bool(b -> b
+                            .must(m -> m.prefix(p -> p.field("responseCode").value("2")))
+                            .must(m -> m.bool(sub -> sub
+                                    // 情况A: 标准的 bizState 错误
+                                    .should(sh -> sh.bool(bb -> bb
+                                            .must(mm -> mm.exists(e -> e.field("bizState.stateInfoName.keyword")))
+                                            .mustNot(mn -> mn.term(t -> t.field("bizState.stateInfoName.keyword").value("业务成功")))
+                                    ))
+                                    // 情况B: Response Body 包含错误码 (补上这个！)
+                                    .should(sh -> sh.matchPhrase(mp -> mp.field("responseBody").query("CODE E")))
+                                    .minimumShouldMatch("1")
+                            ))
+                    ));
+                } else if ("未识别".equals(errorName)) {
+                    // 2. 【未识别】
+                    // 逻辑：技术失败(非2xx) 且 没有异常名称字段
+                    boolQueryBuilderLogs.filter(f -> f.bool(b -> b
+                            .mustNot(mn -> mn.prefix(p -> p.field("responseCode").value("2")))
+                            .mustNot(mn -> mn.exists(e -> e.field("exceptionKnowledge.exceptionName.keyword")))
+                    ));
+                } else {
+                    // 3. 【具体错误名称】
+                    // 逻辑：精确匹配异常名称
+                    boolQueryBuilderLogs.filter(f -> f.term(t -> t
+                            .field("exceptionKnowledge.exceptionName.keyword")
+                            .value(errorName)
+                    ));
+                }
+            }
 
             // 3. 工厂查询 (Factory -> WERKS)
             // 原理：使用短语匹配。ES 会自动分析查询语句，忽略标点，
             // 寻找 "WERKS" 后面紧跟 "A050" 的文档。
             if (StringUtils.isNotEmpty(reqVo.getFactory())) {
-                boolQueryBuilderLogs.must(m -> m.matchPhrase(mp -> mp
-                        .field("requestBody")
-                        .query("WERKS " + reqVo.getFactory().trim())
+                String val = reqVo.getFactory().trim().toLowerCase(); // wildcard要转小写
+                boolQueryBuilderLogs.must(m -> m.bool(b -> b
+                        .must(sub -> sub.matchPhrase(mp -> mp.field("requestBody").query("WERKS"))) // 必须包含 Key
+                        .must(sub -> sub.wildcard(w -> w.field("requestBody").value("*" + val + "*"))) // 值模糊匹配
                 ));
             }
 
-            // 4. 订单号查询 (OrderCode -> AUFNR 或 EBELN)
+            // 2. OrderNumber (订单号 -> EBELN)
             if (StringUtils.isNotEmpty(reqVo.getOrderNumber())) {
-                String code = reqVo.getOrderNumber().trim();
+                String[] codes = reqVo.getOrderNumber().split("[,，]"); // 支持中英文逗号
+
+                boolQueryBuilderLogs.must(m -> m.bool(b -> {
+                    for (String rawCode : codes) {
+                        if (StringUtils.isBlank(rawCode)) continue;
+                        String val = rawCode.trim().toLowerCase(); // wildcard 需转小写
+
+                        // 逻辑：必须包含 Key "EBELN" 且 Value 包含用户输入的数值
+                        // 使用 should 是为了实现：(匹配单号A) OR (匹配单号B)
+                        b.should(s -> s.bool(sub -> sub
+                                .must(mm -> mm.matchPhrase(mp -> mp.field("requestBody").query("EBELN")))
+                                .must(mm -> mm.wildcard(w -> w.field("requestBody").value("*" + val + "*")))
+                        ));
+                    }
+                    // 至少匹配列表中的一个单号
+                    return b.minimumShouldMatch("1");
+                }));
+            }
+
+            // 3. OrderItem (EBELP)
+            if (StringUtils.isNotEmpty(reqVo.getOrderItem())) {
+                String val = reqVo.getOrderItem().trim().toLowerCase();
                 boolQueryBuilderLogs.must(m -> m.bool(b -> b
-                        .should(s -> s.matchPhrase(mp -> mp
-                                .field("requestBody")
-                                .query("AUFNR " + code) // 匹配 "AUFNR":"123"
-                        ))
-                        .should(s -> s.matchPhrase(mp -> mp
-                                .field("requestBody")
-                                .query("EBELN " + code) // 匹配 "EBELN":"123"
-                        ))
-                        .minimumShouldMatch("1")
+                        .must(sub -> sub.matchPhrase(mp -> mp.field("requestBody").query("EBELP")))
+                        .must(sub -> sub.wildcard(w -> w.field("requestBody").value("*" + val + "*")))
+                ));
+            }
+
+            // 4. ProductNumber (AUFNR - 生产订单号)
+            if (StringUtils.isNotEmpty(reqVo.getProductNumber())) {
+                String[] codes = reqVo.getProductNumber().split("[,，]");
+
+                boolQueryBuilderLogs.must(m -> m.bool(b -> {
+                    for (String rawCode : codes) {
+                        if (StringUtils.isBlank(rawCode)) continue;
+                        String val = rawCode.trim().toLowerCase();
+
+                        // 逻辑：是AUFNR 且 包含值
+                        b.should(s -> s.bool(sub -> sub
+                                .must(mm -> mm.matchPhrase(mp -> mp.field("requestBody").query("AUFNR")))
+                                .must(mm -> mm.wildcard(w -> w.field("requestBody").value("*" + val + "*")))
+                        ));
+                    }
+                    return b.minimumShouldMatch("1");
+                }));
+            }
+
+            // 5. ProcessNumber (AUFPL)
+            if (StringUtils.isNotEmpty(reqVo.getProcessNumber())) {
+                String val = reqVo.getProcessNumber().trim().toLowerCase();
+                boolQueryBuilderLogs.must(m -> m.bool(b -> b
+                        .must(sub -> sub.matchPhrase(mp -> mp.field("requestBody").query("AUFPL")))
+                        .must(sub -> sub.wildcard(w -> w.field("requestBody").value("*" + val + "*")))
+                ));
+            }
+
+            // 6. WbsNumber (MAT_PSPNR)
+            if (StringUtils.isNotEmpty(reqVo.getWbsNumber())) {
+                String val = reqVo.getWbsNumber().trim().toLowerCase();
+                boolQueryBuilderLogs.must(m -> m.bool(b -> b
+                        .must(sub -> sub.matchPhrase(mp -> mp.field("requestBody").query("MAT_PSPNR")))
+                        .must(sub -> sub.wildcard(w -> w.field("requestBody").value("*" + val + "*")))
+                ));
+            }
+
+            // 7. MovementType (BWART)
+            if (StringUtils.isNotEmpty(reqVo.getMovementType())) {
+                String val = reqVo.getMovementType().trim().toLowerCase();
+                boolQueryBuilderLogs.must(m -> m.bool(b -> b
+                        .must(sub -> sub.matchPhrase(mp -> mp.field("requestBody").query("BWART")))
+                        .must(sub -> sub.wildcard(w -> w.field("requestBody").value("*" + val + "*")))
+                ));
+            }
+
+            // 8. RequestBody (请求报文模糊搜索)
+            // 用户输入什么搜什么，不限字段。建议用 wildcard 前后匹配
+            if (StringUtils.isNotEmpty(reqVo.getRequestBody())) {
+                String bodyVal = reqVo.getRequestBody().trim();
+
+                // 【修改】改用 matchPhrase，支持中文短语（如"物料"）
+                // 同时也支持英文全词匹配
+                boolQueryBuilderLogs.must(m -> m.matchPhrase(mp -> mp
+                        .field("requestBody")
+                        .query(bodyVal)
+                ));
+            }
+
+            // ================= 【响应报文搜索】 =================
+            // 9. Msg (响应消息 -> MSG)
+            if (StringUtils.isNotEmpty(reqVo.getMsg())) {
+                String msgVal = reqVo.getMsg().trim();
+
+                // 【核心修改】
+                // 不要拼在一起搜，而是拆成两个独立的条件
+                // 逻辑：responseBody 必须包含 "MSG" 且 必须包含 "请检查"
+                boolQueryBuilderLogs.must(m -> m.bool(b -> b
+                        // 条件1：上下文限制，确保报文里有 MSG 这个字段名
+                        .must(sub -> sub.matchPhrase(mp -> mp.field("responseBody").query("MSG")))
+
+                        // 条件2：内容匹配，搜索用户输入的中文/英文短语
+                        .must(sub -> sub.matchPhrase(mp -> mp.field("responseBody").query(msgVal)))
+                ));
+            }
+
+            // 10. ResponseBody (响应报文全局搜索)
+            if (StringUtils.isNotEmpty(reqVo.getResponseBody())) {
+                String bodyVal = reqVo.getResponseBody().trim();
+                // 【建议】使用 matchPhrase
+                // 如果用户搜 "请检查"，ES 会去找 "请"+"检"+"查" 连在一起的数据，能搜到。
+                // 如果用户搜 "UUID"，也能搜到。
+                boolQueryBuilderLogs.must(m -> m.matchPhrase(mp -> mp
+                        .field("responseBody")
+                        .query(bodyVal)
                 ));
             }
 
             Query query = new Query.Builder().bool(boolQueryBuilderLogs.build()).build();
+            List<Map<String, Object>> resultList = new ArrayList<>();
 
-            // ================= 【开始循环查询逻辑】 =================
-            List<FieldValue> searchAfterValues = null; // 游标
-            int pageSize = 2000; // 每次查 2000 条，分批拉取
+            // 局部缓存 (避免循环查库)
+            Map<String, List<String>> processorCache = new HashMap<>();
             long totalHits = 0;  // 总条数
 
-            while (true) {
-                // 2. 构建 Search Request
-                SearchRequest.Builder requestBuilder = new SearchRequest.Builder()
+            // ================= 【核心分流逻辑】 =================
+
+            // 判断是【普通分页】还是【大批量导出/查询】
+            // 阈值设为 500 (一般前端分页不会超过100)
+            boolean isNormalPaging = reqVo.getPageSize() != null && reqVo.getPageSize() <= 500;
+
+            if (isNormalPaging) {
+                // === 场景 A：普通分页 (只查一次，速度快) ===
+                SearchRequest searchRequest = new SearchRequest.Builder()
                         .index(gateIndexName)
                         .query(query)
-                        .size(pageSize)
-                        // 【关键】必须要有确定的排序，才能深分页
-                        .sort(s -> s.field(f -> f.field("requestTime").order(SortOrder.Desc)))
-                        .sort(s -> s.field(f -> f.field("_id").order(SortOrder.Desc))); // _id 兜底保证唯一性
+                        .from((reqVo.getPage() - 1) * reqVo.getPageSize()) // 使用 from 跳过
+                        .size(reqVo.getPageSize())
+                        .sort(s -> s.field(f -> f.field("requestTime").order(SortOrder.Desc))) // 排序
+                        .trackTotalHits(t -> t.enabled(true)) // 开启精确总数
+                        .build();
 
-                // 如果有游标，传给 ES，查下一页
-                if (searchAfterValues != null) {
-                    requestBuilder.searchAfter(searchAfterValues);
-                }
+                SearchResponse<JsonNode> response = esCommonService.search(searchRequest, JsonNode.class);
+                totalHits = response.hits().total().value();
 
-                // 3. 执行查询
-                SearchResponse<JsonNode> responseLogs = esCommonService.search(requestBuilder.build(), JsonNode.class);
-                List<Hit<JsonNode>> hits = responseLogs.hits().hits();
+                // 调用公共方法处理数据
+                resultList.addAll(processHits(response.hits().hits(), reqVo, processorCache));
 
-                // 记录总数 (第一次查的时候拿 total)
-                if (searchAfterValues == null) {
-                    totalHits = responseLogs.hits().total().value();
-                }
+            } else {
+                // === 场景 B：深分页/导出 (循环查，突破10000条) ===
+                List<FieldValue> searchAfterValues = null;
+                int batchSize = 2000; // 内部批次大小
 
-                // 如果没查到数据，跳出循环
-                if (CollectionUtils.isEmpty(hits)) {
-                    break;
-                }
+                while (true) {
+                    SearchRequest.Builder requestBuilder = new SearchRequest.Builder()
+                            .index(gateIndexName)
+                            .query(query)
+                            .size(batchSize) // 每次取 2000
+                            .sort(s -> s.field(f -> f.field("requestTime").order(SortOrder.Desc)))
+                            .sort(s -> s.field(f -> f.field("_id").order(SortOrder.Desc))) // 必须加 _id 保证顺序
+                            .trackTotalHits(t -> t.enabled(true));
 
-                // ================== 【批量处理 MySQL 数据 (当前批次)】 ==================
-                // 收集当前批次的 requestIds
-                List<String> requestIds = hits.stream()
-                        .map(h -> h.source().path("requestId").asText())
-                        .filter(StringUtils::isNotEmpty)
-                        .collect(Collectors.toList());
-
-                // 批量查询 MySQL
-                Map<String, ApiRunTrackInfo> trackInfoMap = new HashMap<>();
-                if (!CollectionUtils.isEmpty(requestIds)) {
-                    List<ApiRunTrackInfo> trackInfos = apiRunTrackInfoMapper.selectList(
-                            new QueryWrapper<ApiRunTrackInfo>().in("request_id", requestIds)
-                    );
-                    trackInfoMap = trackInfos.stream()
-                            .collect(Collectors.toMap(ApiRunTrackInfo::getRequestId, v -> v, (k1, k2) -> k1));
-                }
-                // ================== 【批量处理结束】 ==================
-
-                // 4. 处理数据解析 (循环当前批次)
-                for (Hit<JsonNode> hit : hits) {
-                    JsonNode source = hit.source();
-                    Map<String, Object> item = new HashMap<>();
-
-                    String requestId = source.path("requestId").asText();
-                    String requestBodyStr = source.path("requestBody").asText();
-
-                    // 填充基础字段
-                    item.put("responseBody", source.path("responseBody").asText());
-                    item.put("requestBody", requestBodyStr);
-                    item.put("requestId", requestId);
-                    item.put("requestTime", source.path("requestTime").asText());
-                    item.put("responseCode", source.path("responseCode").asText());
-
-                    // 填充 MySQL 数据
-                    ApiRunTrackInfo trackInfo = trackInfoMap.get(requestId);
-                    if (trackInfo != null) {
-                        String timeStr = "";
-                        if (trackInfo.getPreResolveTime() != null) {
-                            timeStr = sdf.format(trackInfo.getPreResolveTime());
-                        }
-                        item.put("preResolveTime", timeStr);
-                        item.put("result", trackInfo.getResult());
-                    } else {
-                        item.put("preResolveTime", "");
-                        item.put("result", "");
+                    if (searchAfterValues != null) {
+                        requestBuilder.searchAfter(searchAfterValues);
                     }
 
-                    // 解析 API Info
-                    JsonNode apiBaseInfo = source.path("apiBaseInfo");
-                    if (!apiBaseInfo.isMissingNode()) {
-                        Map<String, Object> apiInfoMap = new HashMap<>();
-                        String apiCode = apiBaseInfo.path("apiCode").asText();
+                    SearchResponse<JsonNode> response = esCommonService.search(requestBuilder.build(), JsonNode.class);
+                    List<Hit<JsonNode>> hits = response.hits().hits();
 
-                        // 填充 API 基础信息
-                        apiInfoMap.put("apiId", apiBaseInfo.path("apiId").asText());
-                        apiInfoMap.put("apiCode", apiCode);
-                        apiInfoMap.put("apiName", apiBaseInfo.path("apiName").asText());
-                        apiInfoMap.put("categoryName", apiBaseInfo.path("categoryName").asText());
-
-                        // --- 解析报文提取 Factory 和 OrderNumber ---
-                        String factory = "";
-                        String orderNumber = "";
-
-                        if (StringUtils.isNotEmpty(requestBodyStr) && StringUtils.isNotEmpty(apiCode)) {
-                            try {
-                                JsonNode bodyNode = objectMapper.readTree(requestBodyStr);
-                                if ("SAP_008".equals(apiCode)) {
-                                    // 路径：IV_DATA -> ITEM (数组)
-                                    JsonNode ivData = bodyNode.path("IV_DATA");
-                                    if (!ivData.isMissingNode()) {
-                                        JsonNode items = ivData.path("ITEM");
-                                        if (items.isArray() && items.size() > 0) {
-                                            JsonNode firstItem = items.get(0);
-
-                                            // 1. 提取工厂
-                                            factory = firstItem.path("WERKS").asText("");
-
-                                            // 2. 提取订单号 (优先取 AUFNR，没有则取 EBELN)
-                                            String aufnr = firstItem.path("AUFNR").asText("");
-                                            String ebeln = firstItem.path("EBELN").asText("");
-
-                                            if (StringUtils.isNotEmpty(aufnr)) {
-                                                orderNumber = aufnr;
-                                            } else {
-                                                orderNumber = ebeln;
-                                            }
-                                        }
-                                    }
-                                } else if ("SAP_012".equals(apiCode) || "SAP_013".equals(apiCode)) {
-                                    // 路径：IT_DATA -> item (数组) -> 注意小写
-                                    JsonNode itData = bodyNode.path("IT_DATA");
-                                    if (!itData.isMissingNode()) {
-                                        JsonNode items = itData.path("item");
-                                        if (items.isArray() && items.size() > 0) {
-                                            JsonNode firstItem = items.get(0);
-
-                                            // 1. 提取工厂
-                                            factory = firstItem.path("WERKS").asText("");
-
-                                            // 2. 提取订单号 (优先取 AUFNR，没有则取 EBELN)
-                                            String aufnr = firstItem.path("AUFNR").asText("");
-                                            String ebeln = firstItem.path("EBELN").asText("");
-
-                                            if (StringUtils.isNotEmpty(aufnr)) {
-                                                orderNumber = aufnr;
-                                            } else {
-                                                orderNumber = ebeln;
-                                            }
-                                        }
-                                    }
-                                } else if ("SAP_009".equals(apiCode)) {
-                                    JsonNode orderData = bodyNode.path("IT_ORDER_NUMBER");
-                                    if (!orderData.isMissingNode()) {
-                                        JsonNode items = orderData.path("item"); // 小写 item
-                                        if (items.isArray() && items.size() > 0) {
-                                            JsonNode firstItem = items.get(0);
-
-                                            // 尝试提取工厂 (虽然你提供的报文里没看到，但写上不报错)
-                                            factory = firstItem.path("WERKS").asText("");
-
-                                            // 2. 提取订单号 (优先取 AUFNR，没有则取 EBELN)
-                                            String aufnr = firstItem.path("AUFNR").asText("");
-                                            String ebeln = firstItem.path("EBELN").asText("");
-
-                                            if (StringUtils.isNotEmpty(aufnr)) {
-                                                orderNumber = aufnr;
-                                            } else {
-                                                orderNumber = ebeln;
-                                            }
-                                        }
-                                    }
-                                }
-                            } catch (Exception e) {
-                                // 解析失败不阻断主流程
-                                log.warn("解析报文提取字段失败, apiCode: {}, requestId: {}", apiCode, source.path("requestId").asText());
-                            }
-                        }
-
-
-                        // 将提取到的值放入 map
-                        apiInfoMap.put("factory", factory);
-                        apiInfoMap.put("orderNumber", orderNumber); // 【新增】放入结果集
-
-                        List<String> processorNames = new ArrayList<>();
-
-                        if (StringUtils.isNotEmpty(apiCode) && StringUtils.isNotEmpty(factory)) {
-                            // 【修正】这里建议使用 bizState 动态判断 roleType，
-                            // 但如果你非要用 reqVo.getErrorName()，也可以，但注意这是针对所有行生效
-                            String roleType = "technical";
-                            // 建议逻辑：优先看当前行的 bizState，如果没逻辑则看 reqVo
-                            if ("业务失败".equals(reqVo.getErrorName())) {
-                                roleType = "business";
-                            } else {
-                                // 更好的做法：检查当前行的 bizState
-//                                JsonNode bizState = source.path("bizState");
-//                                if (!bizState.isMissingNode()) {
-//                                    JsonNode stateNode = bizState.isArray() && bizState.size() > 0 ? bizState.get(0) : bizState;
-//                                    String stateName = stateNode.path("stateInfoName").asText();
-//                                    if (StringUtils.isNotEmpty(stateName) && !"业务成功".equals(stateName)) {
-                                        roleType = "business";
-//                                    }
-//                                }
-                            }
-
-                            String cacheKey = apiCode + "_" + factory + "_" + roleType;
-                            if (processorCache.containsKey(cacheKey)) {
-                                processorNames = processorCache.get(cacheKey);
-                            } else {
-                                processorNames = apiApisMapper.queryUserNameByFactoryAndRole(apiCode, factory, roleType);
-                                if (processorNames == null) processorNames = new ArrayList<>();
-                                processorCache.put(cacheKey, processorNames);
-                            }
-                        }
-                        item.put("processor", processorNames);
-
-                        item.put("apiInfo", apiInfoMap);
-                    } else {
-                        item.put("apiInfo", Collections.emptyMap());
+                    if (searchAfterValues == null) {
+                        totalHits = response.hits().total().value();
                     }
-                    resultList.add(item);
-                }
 
-                // 5. 更新游标，准备查下一页
-                Hit<JsonNode> lastHit = hits.get(hits.size() - 1);
-                List<FieldValue> sortValues = lastHit.sort(); // 获取 sort 数组
-                if (sortValues != null && !sortValues.isEmpty()) {
-                    // 【修改点 2】直接赋值，不需要再用 stream().map(...) 转换了
-                    searchAfterValues = sortValues;
-                } else {
-                    break; // 没有 sort 值，无法继续
-                }
+                    if (CollectionUtils.isEmpty(hits)) break;
 
-                // 如果本次查回来的少于 pageSize，说明是最后一页了
-                if (hits.size() < pageSize) {
-                    break;
-                }
+                    // 调用公共方法处理数据
+                    resultList.addAll(processHits(hits, reqVo, processorCache));
 
-                // 【安全阀】防止内存溢出，如果数据量太大(比如 > 5万)，强制停止
-                if (resultList.size() >= 50000) {
-                    log.warn("查询数据量过大，已截断至 50000 条");
-                    break;
+                    // 更新游标
+                    Hit<JsonNode> lastHit = hits.get(hits.size() - 1);
+                    searchAfterValues = lastHit.sort();
+
+                    if (hits.size() < batchSize) break;
+
+                    // 安全阀
+                    if (resultList.size() >= 50000) {
+                        log.warn("查询截断 50000 条");
+                        break;
+                    }
                 }
             }
-            // ================= 【循环查询结束】 =================
 
             Map<String, Object> result = new HashMap<>();
             result.put("total", totalHits);
@@ -1187,30 +1217,221 @@ public class ApiTrackService {
         }
     }
 
+    private List<Map<String, Object>> processHits(List<Hit<JsonNode>> hits, ApiInfoReq reqVo, Map<String, List<String>> processorCache) {
+        List<Map<String, Object>> batchResult = new ArrayList<>();
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+
+        // 1. 提取当前批次的 requestId
+        List<String> requestIds = hits.stream()
+                .map(h -> h.source().path("requestId").asText())
+                .filter(StringUtils::isNotEmpty)
+                .collect(Collectors.toList());
+
+        // 2. 批量查询 MySQL
+        Map<String, ApiRunTrackInfo> trackInfoMap = new HashMap<>();
+        if (!CollectionUtils.isEmpty(requestIds)) {
+            List<ApiRunTrackInfo> trackInfos = apiRunTrackInfoMapper.selectList(
+                    new QueryWrapper<ApiRunTrackInfo>().in("request_id", requestIds)
+            );
+            trackInfoMap = trackInfos.stream()
+                    .collect(Collectors.toMap(ApiRunTrackInfo::getRequestId, v -> v, (k1, k2) -> k1));
+        }
+
+        // 3. 循环解析单条数据
+        for (Hit<JsonNode> hit : hits) {
+            JsonNode source = hit.source();
+            Map<String, Object> item = new HashMap<>();
+
+            String requestId = source.path("requestId").asText();
+            String requestBodyStr = source.path("requestBody").asText();
+
+            // --- 基础字段 ---
+            item.put("responseBody", source.path("responseBody").asText());
+            item.put("requestBody", requestBodyStr);
+            item.put("requestId", requestId);
+            item.put("requestTime", source.path("requestTime").asText());
+            item.put("responseCode", source.path("responseCode").asText());
+
+            // --- MySQL 数据 ---
+            ApiRunTrackInfo trackInfo = trackInfoMap.get(requestId);
+            if (trackInfo != null) {
+                String timeStr = "";
+                if (trackInfo.getPreResolveTime() != null) {
+                    timeStr = sdf.format(trackInfo.getPreResolveTime());
+                }
+                item.put("preResolveTime", timeStr);
+                item.put("result", trackInfo.getResult());
+            } else {
+                item.put("preResolveTime", "");
+                item.put("result", "");
+            }
+
+            // --- API Info & 报文解析 ---
+            JsonNode apiBaseInfo = source.path("apiBaseInfo");
+            if (!apiBaseInfo.isMissingNode()) {
+                Map<String, Object> apiInfoMap = new HashMap<>();
+                String apiCode = apiBaseInfo.path("apiCode").asText();
+
+                apiInfoMap.put("apiId", apiBaseInfo.path("apiId").asText());
+                apiInfoMap.put("apiCode", apiCode);
+                apiInfoMap.put("apiName", apiBaseInfo.path("apiName").asText());
+                apiInfoMap.put("categoryName", apiBaseInfo.path("categoryName").asText());
+
+                // 解析 Factory 和 OrderNumber
+                String factory = "";
+                String orderNumber = "";
+                String orderItem = "";     // EBELP
+                String productNumber = ""; // AUFNR
+                String processNumber = ""; // AUFPL
+                String wbsNumber = "";     // MAT_PSPNR
+                String movementType = "";  // BWART
+                String msg = "";           // MSG (来自响应报文)
+
+                // 1. 解析请求报文 (RequestBody)
+                if (StringUtils.isNotEmpty(requestBodyStr) && StringUtils.isNotEmpty(apiCode)) {
+                    try {
+                        JsonNode bodyNode = objectMapper.readTree(requestBodyStr);
+                        JsonNode itemsNode = null;
+
+                        // 根据不同的 API Code 定位到 item 数组节点
+                        if ("SAP_008".equals(apiCode)) {
+                            itemsNode = bodyNode.path("IV_DATA").path("ITEM");
+                        } else if ("SAP_012".equals(apiCode) || "SAP_013".equals(apiCode)) {
+                            itemsNode = bodyNode.path("IT_DATA").path("item");
+                        } else if ("SAP_009".equals(apiCode)) {
+                            itemsNode = bodyNode.path("IT_ORDER_NUMBER").path("item");
+                        }
+
+                        // 如果找到了数组节点，且不为空，提取第一行数据
+                        if (itemsNode != null && itemsNode.isArray() && itemsNode.size() > 0) {
+                            JsonNode firstItem = itemsNode.get(0);
+
+                            factory = firstItem.path("WERKS").asText("");       // 工厂
+                            orderNumber = firstItem.path("EBELN").asText("");   // 订单号 (采购单)
+                            orderItem = firstItem.path("EBELP").asText("");     // 订单行号
+                            productNumber = firstItem.path("AUFNR").asText(""); // 生产订单号/产品号
+                            processNumber = firstItem.path("AUFPL").asText(""); // 流程/工序号
+                            wbsNumber = firstItem.path("MAT_PSPNR").asText(""); // WBS元素
+                            movementType = firstItem.path("BWART").asText("");  // 移动类型
+                        }
+                    } catch (Exception e) {
+                        log.warn("解析请求报文失败, requestId: {}", requestId);
+                    }
+                }
+
+                // 2. 解析响应报文 (ResponseBody) -> 提取 MSG
+                String responseBodyStr = source.path("responseBody").asText();
+                if (StringUtils.isNotEmpty(responseBodyStr)) {
+                    try {
+                        JsonNode resNode = objectMapper.readTree(responseBodyStr);
+                        // 尝试路径 A: 根目录直接有 MSG
+                        if (resNode.has("MSG")) {
+                            msg = resNode.path("MSG").asText("");
+                        }
+                        // 尝试路径 B: item 数组里的 MSG (如 {"item":[{"MSG":"..."}]})
+                        else {
+                            JsonNode resItems = resNode.path("item");
+                            if (resItems.isArray() && resItems.size() > 0) {
+                                msg = resItems.get(0).path("MSG").asText("");
+                            }
+                        }
+                    } catch (Exception e) {
+                        // 响应报文可能不是 JSON，忽略解析错误
+                    }
+                }
+                apiInfoMap.put("factory", factory);
+                apiInfoMap.put("orderNumber", orderNumber);
+                apiInfoMap.put("orderItem", orderItem);
+                apiInfoMap.put("productNumber", productNumber);
+                apiInfoMap.put("processNumber", processNumber);
+                apiInfoMap.put("wbsNumber", wbsNumber);
+                apiInfoMap.put("movementType", movementType);
+                apiInfoMap.put("msg", msg);
+
+                // 查询 Processor
+                List<String> processorNames = new ArrayList<>();
+                if (StringUtils.isNotEmpty(apiCode) && StringUtils.isNotEmpty(factory)) {
+                    String roleType = "technical";
+                    if ("业务失败".equals(reqVo.getErrorName())) {
+                        roleType = "business";
+                    } else {
+                        JsonNode bizState = source.path("bizState");
+                        if (!bizState.isMissingNode()) {
+                            JsonNode stateNode = bizState.isArray() && bizState.size() > 0 ? bizState.get(0) : bizState;
+                            String stateName = stateNode.path("stateInfoName").asText();
+                            if (StringUtils.isNotEmpty(stateName) && !"业务成功".equals(stateName)) {
+                                roleType = "business";
+                            }
+                        }
+                    }
+
+                    String cacheKey = apiCode + "_" + factory + "_" + roleType;
+                    if (processorCache.containsKey(cacheKey)) {
+                        processorNames = processorCache.get(cacheKey);
+                    } else {
+                        processorNames = apiApisMapper.queryUserNameByFactoryAndRole(apiCode, factory, roleType);
+                        if (processorNames == null) processorNames = new ArrayList<>();
+                        processorCache.put(cacheKey, processorNames);
+                    }
+                }
+                item.put("processor", processorNames);
+                item.put("apiInfo", apiInfoMap);
+            } else {
+                item.put("apiInfo", Collections.emptyMap());
+            }
+            batchResult.add(item);
+        }
+        return batchResult;
+    }
+
     public void exportApiInfo(ApiInfoReq reqVo, HttpServletResponse response) {
         ExcelWriter writer = null;
         try {
             // 1. 获取并转换数据
+            reqVo.setPageSize(1000); // 深度导出
             Map<String, Object> queryResult = this.queryApiInfo(reqVo);
             List<Map<String, Object>> dataList = (List<Map<String, Object>>) queryResult.get("data");
             if (dataList == null) dataList = new ArrayList<>();
 
             List<ApiInfoExportVO> exportData = dataList.stream().map(item -> {
                 ApiInfoExportVO vo = new ApiInfoExportVO();
-                vo.setRequestId(String.valueOf(item.getOrDefault("requestId", "")));
-                vo.setRequestTime(String.valueOf(item.getOrDefault("requestTime", "")));
-                vo.setResponseCode(String.valueOf(item.getOrDefault("responseCode", "")));
-                // 这里虽然是 CSV 不限制长度，但建议还是对极度异常的数据做个兜底
-                vo.setRequestBody(String.valueOf(item.getOrDefault("requestBody", "")));
-                vo.setResponseBody(String.valueOf(item.getOrDefault("responseBody", "")));
+                // --- 基础字段 ---
+                vo.setRequestId(getString(item.get("requestId")));
+                vo.setRequestTime(getString(item.get("requestTime")));
+                vo.setResponseCode(getString(item.get("responseCode")));
 
+                // --- MySQL 补充字段 (修正：从外层 item 获取) ---
+                vo.setPreResolveTime(getString(item.get("preResolveTime")));
+                vo.setResult(getString(item.get("result")));
+
+                // --- 报文截断 (防止 Excel 崩溃) ---
+                vo.setRequestBody(truncateString(getString(item.get("requestBody")), 32000));
+                vo.setResponseBody(truncateString(getString(item.get("responseBody")), 32000));
+
+                // --- 负责人 (修正：从外层 item 获取，且 List 转 String) ---
+                Object processorObj = item.get("processor");
+                if (processorObj instanceof List) {
+                    vo.setProcessor(String.join(",", (List<String>) processorObj));
+                } else {
+                    vo.setProcessor(getString(processorObj));
+                }
+
+                // --- API Info 及 解析字段 ---
                 Map<String, Object> apiInfo = (Map<String, Object>) item.get("apiInfo");
                 if (apiInfo != null) {
-                    vo.setApiName((String) apiInfo.get("apiName"));
-                    vo.setApiCode((String) apiInfo.get("apiCode"));
-                    vo.setCategoryName((String) apiInfo.get("categoryName"));
-                    vo.setFactory((String) apiInfo.get("factory"));
-                    vo.setOrderNumber((String) apiInfo.get("orderNumber"));
+                    vo.setApiName(getString(apiInfo.get("apiName")));
+                    vo.setApiCode(getString(apiInfo.get("apiCode")));
+                    vo.setCategoryName(getString(apiInfo.get("categoryName")));
+
+                    // 解析出来的扩展字段
+                    vo.setFactory(getString(apiInfo.get("factory")));
+                    vo.setOrderNumber(getString(apiInfo.get("orderNumber")));
+                    vo.setOrderItem(getString(apiInfo.get("orderItem")));
+                    vo.setProductNumber(getString(apiInfo.get("productNumber")));
+                    vo.setProcessNumber(getString(apiInfo.get("processNumber")));
+                    vo.setWbsNumber(getString(apiInfo.get("wbsNumber")));
+                    vo.setMovementType(getString(apiInfo.get("movementType")));
+                    vo.setMsg(getString(apiInfo.get("msg")));
                 }
                 return vo;
             }).collect(Collectors.toList());
@@ -1251,6 +1472,18 @@ public class ApiTrackService {
                 writer.finish();
             }
         }
+    }
+
+    private String getString(Object obj) {
+        return obj == null ? "" : String.valueOf(obj);
+    }
+
+    /**
+     * 字符串截断
+     */
+    private String truncateString(String str, int len) {
+        if (str == null) return "";
+        return str.length() > len ? str.substring(0, len) + "..." : str;
     }
 
     public Map<String, Object> aggregationResultByCategory(AggResultSearchReq reqVo) {
@@ -1467,5 +1700,350 @@ public class ApiTrackService {
         } catch (Exception e) {
             throw new XdapWarningException(DeipaasExceptionEnum.SEARCH_FAIL, e);
         }
+    }
+
+    /**
+     * 统计接口报错分布
+     */
+    public List<ApiErrorStatDto> analyzeApiErrorStats(ApiErrorAnalysisReq reqVo) {
+        try {
+            // 1. 构建基础查询条件 (保持不变：只查失败的数据)
+            BoolQuery.Builder bool = new BoolQuery.Builder();
+            // 处理开始时间
+            if (StringUtils.isNotEmpty(reqVo.getStartTime())) {
+                String startTime = reqVo.getStartTime().trim();
+                if (startTime.length() == 19) {
+                    startTime = startTime + ".000";
+                }
+                String finalStartTime = startTime;
+                bool.filter(f -> f.range(r -> r.date(n -> n.field(REQUEST_TIME).gte(finalStartTime))));
+            }
+
+            // 2. 处理结束时间
+            if (StringUtils.isNotEmpty(reqVo.getEndTime())) {
+                String endTime = reqVo.getEndTime().trim();
+                if (endTime.length() == 19) {
+                    endTime = endTime + ".000";
+                }
+                String finalEndTime = endTime;
+                bool.filter(f -> f.range(r -> r.date(n -> n.field(REQUEST_TIME).lt(finalEndTime))));
+            }
+            if (StringUtils.isNotEmpty(reqVo.getEnvId())) {
+                bool.filter(f -> f.term(t -> t.field("envId").value(reqVo.getEnvId())));
+            }
+
+            if (StringUtils.isNotBlank(reqVo.getApiCode())) {
+                bool.filter(f -> f.term(t -> t
+                        .field("apiBaseInfo.apiCode.keyword") // 字段路径
+                        .value(reqVo.getApiCode())            // 传入单个字符串
+                ));
+            }
+            if (!CollectionUtils.isEmpty(reqVo.getApiName())) {
+                bool.filter(f -> f.terms(t -> t
+                        .field("apiBaseInfo.apiName.keyword")
+                        .terms(terms -> terms.value(reqVo.getApiName().stream().map(FieldValue::of).collect(Collectors.toList())))
+                ));
+            }
+            if (StringUtils.isNotBlank(reqVo.getCategory())) {
+                // 【修改】必须使用 wildcard 而不是 term
+                bool.must(m -> m.wildcard(w -> w
+                        .field("apiBaseInfo.categoryName.keyword")
+                        .value("*" + reqVo.getCategory().trim() + "*") // 前后加 * 实现包含匹配
+                ));
+            }
+
+            if (StringUtils.isNotEmpty(reqVo.getFactory())) {
+                // 使用 matchPhrase 匹配 "WERKS A050"
+                // 只要 requestBody 里有 "WERKS":"A050" 就能搜到
+                bool.must(m -> m.matchPhrase(mp -> mp
+                        .field("requestBody")
+                        .query("WERKS " + reqVo.getFactory().trim())
+                ));
+            }
+
+            if (StringUtils.isNotEmpty(reqVo.getMsg())) {
+                String keyword = reqVo.getMsg().trim();
+                bool.must(m -> m.bool(b -> b
+                        // 搜响应体 (中文/英文短语)
+                        .should(s -> s.bool(sub -> sub
+                                .must(mm -> mm.matchPhrase(mp -> mp.field("responseBody").query("MSG")))
+                                .must(mm -> mm.matchPhrase(mp -> mp.field("responseBody").query(keyword)))
+                        ))
+                        // 搜异常栈信息 (如果需要的话)
+                        .should(s -> s.matchPhrase(mp -> mp.field("exceptionKnowledge.exceptionName").query(keyword)))
+                        .minimumShouldMatch("1")
+                ));
+            }
+
+            // 筛选失败数据
+            bool.must(m -> m.bool(b -> b
+                    // 1. 技术失败 (HTTP 非 2xx)
+                    .should(s -> s.bool(bb -> bb.mustNot(mn -> mn.prefix(p -> p.field("responseCode").value("2")))))
+
+                    // 2. 标准业务失败 (HTTP 2xx 且 有bizState 且 状态不为成功)
+                    .should(s -> s.bool(bb -> bb
+                            .must(mn -> mn.prefix(p -> p.field("responseCode").value("2")))
+                            .must(mn -> mn.exists(e -> e.field("bizState.stateInfoName.keyword")))
+                            .mustNot(mn -> mn.term(t -> t.field("bizState.stateInfoName.keyword").value("业务成功")))
+                    ))
+
+                    // 3. 【新增】特殊业务失败 (HTTP 2xx 且 响应体包含错误码)
+                    // 针对那些没有 bizState，但 responseBody 里写了 "CODE":"E" 的情况
+                    .should(s -> s.bool(bb -> bb
+                            .must(mn -> mn.prefix(p -> p.field("responseCode").value("2")))
+                            // 必须包含 "CODE" 和 "E" (根据你的实际报文调整，比如 "CODE E" 或 "status error")
+                            .must(mn -> mn.matchPhrase(mp -> mp.field("responseBody").query("CODE E")))
+                    ))
+
+                    .minimumShouldMatch("1")
+            ));
+
+            // 增加工厂
+            // 脚本 A: 提取工厂 (从 requestBody)
+            String factoryScript =
+                    "if (params['_source']['requestBody'] == null) return '无工厂'; " +
+                            "String body = params['_source']['requestBody'].toString(); " +
+                            // 正则匹配 "WERKS":"A050" (兼容冒号两边的空格)
+                            "def m = /\"WERKS\"\\s*:\\s*\"([^\"]+)\"/.matcher(body); " +
+                            "if (m.find()) { return m.group(1); } " +
+                            "return '无工厂';";
+
+            // 1. 获取动态规则 (调用上面的新方法)
+            List<Map<String, String>> ruleParams = getErrorAggregationRules();
+            // 2. 脚本逻辑 (保持不变，它只负责接收 rules 参数并执行)
+            String errorMsgScript =
+                    "if (params['_source']['responseBody'] == null) return null; " +
+                            "String body = params['_source']['responseBody'].toString(); " +
+                            // 提取 MSG
+                            "def m = /\"MSG\":\"([^\"]+)\"/.matcher(body); " +
+                            "if (m.find()) { " +
+                            "   String rawMsg = m.group(1); " +
+                            // 动态匹配
+                            "   def rules = params['rules']; " +
+                            "   if (rules != null) { " +
+                            "       for (def rule : rules) { " +
+                            "           if (rawMsg.contains(rule['keyword'])) { " +
+                            "               return rule['category']; " +
+                            "           } " +
+                            "       } " +
+                            "   } " +
+                            "   return rawMsg; " +
+                            "} " +
+                            "return '未提取到错误信息';"; // 不要返回 null，返回固定字符串
+
+            // 3. 构建聚合 (传入 rules)
+            SearchRequest searchRequest = new SearchRequest.Builder()
+                    .index(gateIndexName)
+                    .query(bool.build()._toQuery())
+                    .size(0)
+                    // 第一层：按工厂聚合 (Script)
+                    .aggregations("by_factory", agg1 -> agg1
+                            .terms(t -> t
+                                    .script(sc -> sc.source(factoryScript))
+                                    .size(50) // 假设工厂数不超过50
+                            )
+                            // 第二层：按 API 编码聚合
+                            .aggregations("by_api_code", agg2 -> agg2
+                                    .terms(t -> t
+                                            .field("apiBaseInfo.apiCode.keyword")
+                                            .size(100)
+                                    )
+                                    // 子聚合：取 API 名称
+                                    .aggregations("get_api_name", sub -> sub.topHits(th -> th.size(1).source(s -> s.filter(f -> f.includes("apiBaseInfo.apiName")))))
+                                    // 第三层：按错误信息聚合 (Script + Params)
+                                    .aggregations("by_msg", agg3 -> agg3
+                                            .terms(t -> t
+                                                    .script(sc -> sc
+                                                            .source(errorMsgScript)
+                                                            .params("rules", JsonData.of(ruleParams))
+                                                    )
+                                                    .size(50)
+                                            )
+                                    )
+                            )
+                    )
+                    .build();
+
+            // 4. 执行查询
+            SearchResponse<JsonNode> response = esCommonService.search(searchRequest, JsonNode.class);
+            List<ApiErrorStatDto> resultList = new ArrayList<>();
+            Aggregate factoryAgg = response.aggregations().get("by_factory");
+
+            if (factoryAgg != null) {
+                // 1. 遍历工厂桶
+                for (StringTermsBucket factoryBucket : factoryAgg.sterms().buckets().array()) {
+                    String factory = factoryBucket.key().stringValue();
+
+                    Aggregate apiAgg = factoryBucket.aggregations().get("by_api_code");
+                    if (apiAgg != null) {
+                        // 2. 遍历 API 桶
+                        for (StringTermsBucket apiBucket : apiAgg.sterms().buckets().array()) {
+                            String apiCode = apiBucket.key().stringValue();
+                            long subTotalErrorCount = apiBucket.docCount(); // 该工厂下该 API 的报错总数
+
+                            // 获取 API Name
+                            String apiName = apiCode;
+                            Aggregate getNameAgg = apiBucket.aggregations().get("get_api_name");
+                            if (getNameAgg != null && getNameAgg.isTopHits()) {
+                                List<Hit<JsonData>> hits = getNameAgg.topHits().hits().hits();
+                                if (!hits.isEmpty()) {
+                                    JsonData jsonData = hits.get(0).source();
+                                    if (jsonData != null) {
+                                        JsonNode sourceNode = jsonData.to(JsonNode.class);
+                                        apiName = sourceNode.path("apiBaseInfo").path("apiName").asText(apiCode);
+                                    }
+                                }
+                            }
+
+                            Aggregate msgAgg = apiBucket.aggregations().get("by_msg");
+                            if (msgAgg != null) {
+                                long sumOfDetailedErrors = 0L;
+                                // 3. 遍历错误信息桶
+                                for (StringTermsBucket msgBucket : msgAgg.sterms().buckets().array()) {
+                                    String errorMsg = msgBucket.key().stringValue();
+                                    long errorCount = msgBucket.docCount();
+
+                                    sumOfDetailedErrors += errorCount;
+
+                                    // 组装对象
+                                    ApiErrorStatDto dto = new ApiErrorStatDto();
+                                    dto.setFactory(factory); // 【新增】设置工厂
+                                    dto.setApiCode(apiCode);
+                                    dto.setApiName(apiName);
+                                    dto.setMsg(errorMsg);
+                                    dto.setErrorCount(errorCount);
+                                    dto.setSubTotalErrorCount(subTotalErrorCount);
+
+                                    if (subTotalErrorCount > 0) {
+                                        double ratio = (double) errorCount / subTotalErrorCount * 100;
+                                        dto.setErrorRatio(String.format("%.2f%%", ratio));
+                                    } else {
+                                        dto.setErrorRatio("0.00%");
+                                    }
+                                    resultList.add(dto);
+                                }
+
+                                long remainder = subTotalErrorCount - sumOfDetailedErrors;
+                                if (remainder > 0) {
+                                    ApiErrorStatDto otherDto = new ApiErrorStatDto();
+                                    // 如果你在最外层还有 factory 循环，这里记得 setFactory
+                                    if (StringUtils.isNotEmpty(reqVo.getFactory())) {
+                                        otherDto.setFactory(reqVo.getFactory());
+                                    } else {
+                                        otherDto.setFactory("其他/混合");
+                                    }
+
+                                    otherDto.setApiCode(apiCode);
+                                    otherDto.setApiName(apiName);
+                                    otherDto.setMsg("其他错误 (分散的生僻报错)"); // 或者 "其他"
+                                    otherDto.setErrorCount(remainder);
+                                    otherDto.setSubTotalErrorCount(subTotalErrorCount);
+
+                                    double ratio = (double) remainder / subTotalErrorCount * 100;
+                                    otherDto.setErrorRatio(String.format("%.2f%%", ratio));
+
+                                    resultList.add(otherDto);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // ================= 7. 【新增】Java 内存排序 =================
+            // ES 聚合排序比较麻烦，直接在 Java 层对结果 List 排序最灵活
+            if (StringUtils.isNotEmpty(reqVo.getSortField())) {
+                Comparator<ApiErrorStatDto> comparator = null;
+                String sortField = reqVo.getSortField();
+
+                if ("errorCount".equals(sortField)) {
+                    comparator = Comparator.comparingLong(ApiErrorStatDto::getErrorCount);
+                } else if ("subTotalErrorCount".equals(sortField)) {
+                    comparator = Comparator.comparingLong(ApiErrorStatDto::getSubTotalErrorCount);
+                } else if ("apiName".equals(sortField)) {
+                    comparator = Comparator.comparing(ApiErrorStatDto::getApiName, Comparator.nullsLast(String::compareTo));
+                }
+
+                if (comparator != null) {
+                    if ("desc".equalsIgnoreCase(reqVo.getSortOrder())) {
+                        comparator = comparator.reversed();
+                    }
+                    resultList.sort(comparator);
+                }
+            }
+
+            return resultList;
+
+        } catch (ElasticsearchException esEx) {
+            log.error("ES聚合查询详细报错: {}", esEx.response().error().reason());
+            if (esEx.response().error().rootCause() != null) {
+                esEx.response().error().rootCause().forEach(cause -> {
+                    log.error("Root Cause: Type=[{}], Reason=[{}]", cause.type(), cause.reason());
+                });
+            }
+            throw new XdapWarningException(DeipaasExceptionEnum.SEARCH_FAIL, esEx);
+        } catch (Exception e) {
+            log.error("analyzeApiErrorStats error", e);
+            throw new XdapWarningException(DeipaasExceptionEnum.SEARCH_FAIL, e);
+        }
+    }
+
+    /**
+     * 从数据字典解析聚合规则
+     * 逻辑：
+     * 1. 解析 headers，找到 "Value" (关键字) 和 "Value1" (分类名) 对应的 UUID
+     * 2. 遍历 data，根据 UUID 提取数据
+     */
+    private List<Map<String, String>> getErrorAggregationRules() {
+        List<Map<String, String>> rules = new ArrayList<>();
+        try {
+            // 1. 查库
+            String jsonStr = apiDictionaryMapper.queryDictionaryData("755183065751356416", "Works_Error_Type");
+
+            if (StringUtils.isEmpty(jsonStr)) {
+                return rules;
+            }
+
+            // 2. 解析 JSON
+            JsonNode root = objectMapper.readTree(jsonStr);
+            JsonNode headers = root.path("headers");
+            JsonNode data = root.path("data");
+
+            // 3. 寻找列 ID (UUID)
+            String targetColId = null;
+
+            if (headers.isArray()) {
+                for (JsonNode header : headers) {
+                    String name = header.path("name").asText();
+                    // 只要 Value1
+                    if ("Value1".equals(name)) {
+                        targetColId = header.path("id").asText();
+                        break; // 找到了就退出循环
+                    }
+                }
+            }
+
+            // 3. 提取数据
+            if (targetColId != null && data.isArray()) {
+                for (JsonNode row : data) {
+                    // 获取 Value1 的值
+                    String content = row.path(targetColId).asText(null);
+
+                    if (StringUtils.isNotBlank(content)) {
+                        Map<String, String> map = new HashMap<>();
+                        // 【修改】关键字和分类名都使用 Value1 的内容
+                        map.put("keyword", content.trim());
+                        map.put("category", content.trim());
+                        rules.add(map);
+                    }
+                }
+            }
+
+            // 4. 按长度倒序排序 (防止 "订单已结算" 被 "订单" 抢先匹配)
+            rules.sort((r1, r2) -> Integer.compare(r2.get("keyword").length(), r1.get("keyword").length()));
+
+        } catch (Exception e) {
+            log.error("解析聚合字典失败", e);
+        }
+        return rules;
     }
 }

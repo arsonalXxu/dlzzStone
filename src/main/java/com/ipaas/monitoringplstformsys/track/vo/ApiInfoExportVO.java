@@ -29,8 +29,26 @@ public class ApiInfoExportVO {
     @ExcelProperty("工厂")
     private String factory;
 
-    @ExcelProperty("订单号")
+    @ExcelProperty("采购订单号")
     private String orderNumber;
+
+    @ExcelProperty("采购订单行项目") // EBELP
+    private String orderItem;
+
+    @ExcelProperty("生产订单号") // AUFNR
+    private String productNumber;
+
+    @ExcelProperty("工序号") // AUFPL
+    private String processNumber;
+
+    @ExcelProperty("WBS") // MAT_PSPNR
+    private String wbsNumber;
+
+    @ExcelProperty("移动类型") // BWART
+    private String movementType;
+
+    @ExcelProperty("响应MSG") // MSG
+    private String msg;
 
     @ExcelProperty("请求报文")
     @ColumnWidth(50)
@@ -39,4 +57,13 @@ public class ApiInfoExportVO {
     @ExcelProperty("响应报文")
     @ColumnWidth(50)
     private String responseBody;
+
+    @ExcelProperty("处理人")
+    private String processor;
+
+    @ExcelProperty("预计处理时间")
+    private String preResolveTime;
+
+    @ExcelProperty("处理结果")
+    private String result;
 }

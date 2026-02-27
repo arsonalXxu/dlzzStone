@@ -4,6 +4,7 @@ package com.ipaas.monitoringplstformsys.track.controller;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ipaas.monitoringplstformsys.common.response.Response;
 import com.ipaas.monitoringplstformsys.track.AggResultSearchReq;
+import com.ipaas.monitoringplstformsys.track.ApiErrorAnalysisReq;
 import com.ipaas.monitoringplstformsys.track.ApiInfoReq;
 import com.ipaas.monitoringplstformsys.track.service.ApiTrackService;
 import com.ipaas.monitoringplstformsys.track.vo.HitResultVo;
@@ -64,6 +65,11 @@ public class ApiTrackController {
     @PostMapping("/ApiInfoExport")
     public void export(@RequestBody ApiInfoReq reqVo, HttpServletResponse response) {
         apiTrackService.exportApiInfo(reqVo, response);
+    }
+
+    @PostMapping("/errorStats")
+    public Response getApiErrorStats(@RequestBody ApiErrorAnalysisReq reqVo) {
+        return Response.ok().setData(apiTrackService.analyzeApiErrorStats(reqVo));
     }
 
     @PostMapping("/aggregationResultByCategory")
